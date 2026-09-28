@@ -1,0 +1,40 @@
+#!/bin/bash
+# cmd/install_callback - 安装后置：准备数据目录。
+#
+# 重要约束（skill lifecycle-hardening）：
+#   install_callback 在「重新安装」时同样会执行，因此**绝不能无条件重建**
+#   已存在的用户数据 —— 那会清空账号凭证与密钥。
+#
+# 鉴权说明：面板没有自带登录密码，鉴权由飞牛统一网关完成
+# （校验飞牛登录态并注入 X-Trim-* 用户上下文，仅管理员可访问），
+# 因此本脚本不生成任何口令。控制台密钥由 cli2api 子进程首次启动时
+# 自动生成并存入 ${TRIM_PKGVAR}/data/qoder.db，无需人工干预。
+
+set -u
+
+echo "正在配置 CLI2API 网关..."
+
+DATA_DIR="${TRIM_PKGVAR}"
+
+# 数据目录创建放在这里（而非 install_init）：此阶段环境已就绪。
+if ! mkdir -p "$DATA_DIR"; then
+    echo "Error: 无法创建数据目录 ${DATA_DIR}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"
+    echo "Error: 无法创建数据目录 ${DATA_DIR}" >&2
+    exit 1
+fi
+
+# data/    持久数据：SQLite（账号凭证、API 密钥、控制台密钥、运行台账）
+# runtime/ 每账号运行时工作目录（可重建的缓存，勿手工干预）
+mkdir -p "${DATA_DIR}/data" "${DATA_DIR}/runtime" || {
+    echo "Error: 无法创建应用子目录" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"
+    exit 1
+}
+chmod 700 "${DATA_DIR}/data" 2>/dev/null
+chmod 700 "${DATA_DIR}/runtime" 2>/dev/null
+
+# 清理上次异常退出残留的 socket（重新安装场景）。
+rm -f "${TRIM_APPDEST}/cli2api.sock" 2>/dev/null
+
+echo "数据目录已就绪: ${DATA_DIR}"
+echo "安装完成。请从飞牛桌面「CLI2API 网关」图标打开控制台（仅管理员可见）。"
+exit 0

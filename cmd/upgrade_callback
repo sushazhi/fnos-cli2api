@@ -1,0 +1,27 @@
+#!/bin/bash
+# cmd/upgrade_callback - 升级后置：补齐目录、清理残留，绝不触碰用户数据。
+#
+# 用户数据（含 ${TRIM_PKGVAR}/data/qoder.db 内的账号凭证、API 密钥、
+# 控制台密钥）一律原样保留；升级只需要保证目录完整与 socket 清理。
+
+set -u
+
+echo "正在完成 CLI2API 网关升级..."
+
+DATA_DIR="${TRIM_PKGVAR}"
+
+mkdir -p "${DATA_DIR}/data" "${DATA_DIR}/runtime" 2>/dev/null
+chmod 700 "${DATA_DIR}/data" 2>/dev/null
+
+# 清理升级前的 socket 残留，避免启动时 bind 失败。
+rm -f "${TRIM_APPDEST}/cli2api.sock" 2>/dev/null
+
+# 每账号 runtime 目录属于可重建缓存；升级上游版本时清掉旧运行时，
+# 避免旧 worker 的残留状态与新版本不匹配（账号凭证在 data/ 中，不受影响）。
+if [ -d "${DATA_DIR}/runtime" ]; then
+    find "${DATA_DIR}/runtime" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} + 2>/dev/null
+    echo "已清理可重建的运行时缓存（账号凭证与密钥保留）"
+fi
+
+echo "升级完成，账号与密钥均已保留"
+exit 0
