@@ -140,7 +140,13 @@ def download(url, out_file, desc, use_proxy=True, force=False):
         return True
 
     log(f"  下载 {desc} ...")
-    urls = [MAIN_PROXY + url, FALLBACK_PROXY + url, url] if use_proxy else [url]
+    # 代理只在直连 GitHub 不通的环境（如国内家宽）才需要。CI runner 能直连，
+    # 走代理反而更慢、甚至长时间挂住；置 FNOX_NO_GH_PROXY=1 即只用直连地址。
+    no_proxy = os.environ.get("FNOX_NO_GH_PROXY", "").strip().lower()
+    if not use_proxy or no_proxy not in ("", "0", "false", "no"):
+        urls = [url]
+    else:
+        urls = [MAIN_PROXY + url, FALLBACK_PROXY + url, url]
 
     last_err = ""
     for u in urls:

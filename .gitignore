@@ -3,3 +3,6 @@
 __pycache__/
 *.pyc
 *.fpk
+
+# CI 生成的校验和（只作为 Release 资产与 Actions 产物，不入库）
+SHA256SUMS.txt

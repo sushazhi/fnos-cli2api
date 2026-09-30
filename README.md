@@ -172,6 +172,31 @@ python assets/render-icons.py        # 重新生成 ICON.PNG / ICON_256.PNG / ap
 
 任一失败即中止并给出可操作提示，不产出 fpk。
 
+### 3.4 自动跟随上游（GitHub Actions）
+
+`.github/workflows/build-and-release.yml` 每 2 天跑一次（cron `17 4 */2 * *`，UTC，
+即北京时间 12:17；也可在 Actions 页面手动触发）：
+
+1. `scripts/upstream_sync.py check` 查上游最新正式 Release，与 `build.py` 的
+   `UPSTREAM_TAG` 比较。
+2. **有更新**：把版本落进仓库文件（`build.py` 的 `UPSTREAM_TAG` 与两处说明性注释、
+   `manifest` 的 `version` 与 `changelog`、`README.md` 的三处当前版本引用），
+   构建 amd64 + arm64 两个 fpk，**构建通过后**才提交推回 `main`，并建一个以
+   上游 tag 命名的 Release（`v0.6.14` 这类），附上两个 fpk 与 `SHA256SUMS.txt`。
+3. **无更新**：直接跳过，不构建、不提交、不发布，流程仍是绿的。
+
+顺序上「先构建、后提交」是有意的：`main` 上不会出现"版本号已改但构建不出来"的提交。
+
+手动触发时的 `force` 选项会忽略上游比较、按仓库里已锁定的版本重新出包；若上游
+此时正好有更新的版本，会顺带把新版本一起带上，不会反而重发旧版本。
+
+`scripts/upstream_sync.py` 的替换全部基于**锚点**并要求恰好命中 1 处，命中后内容
+还必须真的变化，否则报错退出。所以 README 里描述历史事实的版本号（如「自 0.6.13-1
+起，网关会给每个 worker 注入 V8 老生代上限」）不会被误改 —— 它记录的是该能力
+**引入**的版本，不是当前版本。要新增版本引用，请按同样方式给锚点，不要改成全局替换。
+
+> 说明：Actions 的 `schedule` 在仓库连续 60 天无提交后会暂停，届时手动跑一次即可恢复。
+
 ---
 
 ## 4. 安装与升级
