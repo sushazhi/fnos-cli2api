@@ -60,6 +60,14 @@ const (
 	workerBasePort = 32100
 	// nodeRuntimeDir 应用中心运行时依赖 nodejs_v24 的安装位置。
 	nodeRuntimeDir = "/var/apps/nodejs_v24/target/bin"
+	// defaultWorkerMaxOldSpaceMB 每个 Qoder worker 的 V8 老生代上限（MB）。
+	// 每个启用账号是一个常驻 Node 进程（实测 arm64 / 4GB 设备空闲 RSS ≈ 511MB，
+	// 2 个账号就吃掉 1GB）。该 511MB 里大头是 WASM 实例与 bundle 编译产物，
+	// 不归本上限管；这里主要兜住 JS 堆侧的无界增长（如 rewarmContext 新建
+	// WASM 上下文、旧的 free() 已被 sealContext() 封掉），避免拖入 swap。
+	defaultWorkerMaxOldSpaceMB = 384
+	// workerHeapEnv 覆盖 defaultWorkerMaxOldSpaceMB 的环境变量名（0 = 不注入）。
+	workerHeapEnv = "QODER_WORKER_MAX_OLD_SPACE_MB"
 	// readyTimeout cli2api 子进程就绪等待上限；应小于 cmd/main 的失效窗口。
 	readyTimeout = 20 * time.Second
 	// stopTimeout 子进程优雅退出等待上限。
@@ -118,6 +126,11 @@ func main() {
 	}
 	if _, statErr := os.Stat(filepath.Join(lay.appDest, "worker", "src", "daemon.mjs")); statErr != nil {
 		log.Printf("⚠️  未找到 worker 组件（%s）——Qoder 账号将无法启动", filepath.Join(lay.appDest, "worker", "src", "daemon.mjs"))
+	}
+	if mb := workerMaxOldSpaceMB(); mb > 0 {
+		log.Printf("  Worker 堆上限: --max-old-space-size=%d（每个启用账号一份，超出触发 GC 而非吞内存）", mb)
+	} else {
+		log.Printf("  Worker 堆上限: 未注入（%s=0，Node 按物理内存自行推算）", workerHeapEnv)
 	}
 
 	internalPort, err := pickPort()
@@ -402,6 +415,12 @@ func childEnv(lay layout, node, portText string) []string {
 		"PLAIN_TEMPLATE_PATH=" + filepath.Join(workerDir, "last-plain.sample.json"),
 		"QODER_WORKER_BASE_PORT=" + strconv.Itoa(workerBasePort),
 	}
+	// NODE_OPTIONS 沿 环境继承链 原样传到每个 worker：本进程 → cli2api 子进程
+	// （providers/qoder/starter.go 的 proxyEnv 只过滤代理变量）→ node daemon.mjs。
+	// 每个 worker 各拿一份，因此这是「单账号」上限，不是总量。
+	if mb := workerMaxOldSpaceMB(); mb > 0 {
+		env = append(env, "NODE_OPTIONS=--max-old-space-size="+strconv.Itoa(mb))
+	}
 	if node != "" {
 		env = append(env, "QODER_NODE_BINARY="+node)
 		// worker 与 Qoder CLI 都可能自行调用 node，PATH 里必须有它。
@@ -470,6 +489,24 @@ func fileExists(path string) bool {
 // signalContext 监听 SIGINT/SIGTERM（cmd/main 用 SIGTERM 请求优雅退出）。
 func signalContext() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
+// workerMaxOldSpaceMB 解析单个 worker 的 V8 老生代上限（MB），0 表示不注入
+// NODE_OPTIONS。
+//
+// 默认 defaultWorkerMaxOldSpaceMB。QODER_WORKER_MAX_OLD_SPACE_MB 可覆盖，
+// 设为 0 关闭该注入（回退到 Node 自身按物理内存推算的默认值）。
+func workerMaxOldSpaceMB() int {
+	raw := strings.TrimSpace(os.Getenv(workerHeapEnv))
+	if raw == "" {
+		return defaultWorkerMaxOldSpaceMB
+	}
+	mb, err := strconv.Atoi(raw)
+	if err != nil || mb < 0 {
+		log.Printf("⚠️  %s=%q 不是合法 MB 数，回退默认 %d", workerHeapEnv, raw, defaultWorkerMaxOldSpaceMB)
+		return defaultWorkerMaxOldSpaceMB
+	}
+	return mb
 }
 
 // throttledWarn 限流日志：控制台密钥读取失败会伴随每个 /api 请求，

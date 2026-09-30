@@ -3,6 +3,8 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -128,5 +130,57 @@ func TestPublicRoutesForwardsPathVerbatim(t *testing.T) {
 
 	if seen != "/v1/chat/completions/" {
 		t.Errorf("上游收到的路径为 %q，期望原样 /v1/chat/completions/", seen)
+	}
+}
+
+// TestChildEnvInjectsWorkerHeapCap 锁定「给每个 Qoder worker 注入 V8 堆上限」。
+//
+// 每个启用账号是一个常驻 Node 进程（实测空闲 RSS ≈ 511MB），不给上限时
+// V8 按物理内存推算默认堆，多账号会吃满内存并开始 swap。注入点必须落在
+// childEnv 里，才能沿 环境继承链 传到 worker：
+//
+//	fngateway(本函数) → cli2api 子进程(providers/qoder/starter.go proxyEnv
+//	只过滤代理变量，其余原样继承) → node daemon.mjs
+func TestChildEnvInjectsWorkerHeapCap(t *testing.T) {
+	lay := layout{appDest: "/appdest", pkgVar: "/pkgvar", socket: "/appdest/cli2api.sock", port: 3010}
+
+	find := func(env []string, key string) (string, bool) {
+		for _, kv := range env {
+			if strings.HasPrefix(kv, key+"=") {
+				return strings.TrimPrefix(kv, key+"="), true
+			}
+		}
+		return "", false
+	}
+
+	// 默认：注入 --max-old-space-size，值是正数。
+	t.Setenv(workerHeapEnv, "")
+	got, ok := find(childEnv(lay, "/usr/bin/node", "4567"), "NODE_OPTIONS")
+	if !ok {
+		t.Fatalf("默认未注入 NODE_OPTIONS，worker 将按物理内存自算堆上限")
+	}
+	if want := "--max-old-space-size=" + strconv.Itoa(defaultWorkerMaxOldSpaceMB); got != want {
+		t.Errorf("NODE_OPTIONS = %q，期望 %q", got, want)
+	}
+
+	// 显式覆盖生效。
+	t.Setenv(workerHeapEnv, "256")
+	if got, _ := find(childEnv(lay, "", "4567"), "NODE_OPTIONS"); got != "--max-old-space-size=256" {
+		t.Errorf("覆盖后 NODE_OPTIONS = %q，期望 --max-old-space-size=256", got)
+	}
+
+	// 0 表示关闭注入（回退 Node 默认行为），必须真的不出现该键。
+	t.Setenv(workerHeapEnv, "0")
+	if got, ok := find(childEnv(lay, "", "4567"), "NODE_OPTIONS"); ok {
+		t.Errorf("%s=0 时应不注入 NODE_OPTIONS，实际为 %q", workerHeapEnv, got)
+	}
+
+	// 非法值必须回退默认，而不是把垃圾串塞进 Node 命令行。
+	for _, bad := range []string{"abc", "-1", "12.5"} {
+		t.Setenv(workerHeapEnv, bad)
+		want := "--max-old-space-size=" + strconv.Itoa(defaultWorkerMaxOldSpaceMB)
+		if got, _ := find(childEnv(lay, "", "4567"), "NODE_OPTIONS"); got != want {
+			t.Errorf("%s=%q 时 NODE_OPTIONS = %q，期望回退 %q", workerHeapEnv, bad, got, want)
+		}
 	}
 }

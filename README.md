@@ -43,7 +43,8 @@
 2. **免密登录**：上游控制台需要一把 API 密钥才能进入。网关侧从 SQLite 读取该密钥并注入，浏览器只拿到占位串，**密钥不出现在前端**。
 3. **身份约束**：控制台是管理员专属，网关根据 `X-Trim-Isadmin` 拒绝非管理员。
 4. **端口隔离**：飞牛 1.2.0604+ 会拦截非飞牛票据的 `Authorization` 头（判定为 `invalid token`）。外部客户端因此必须走独立 TCP 端口，且该端口只放行 `/v1/*`。
-5. **接入地址纠偏**：控制台「API 接入」页的地址是给外部客户端抄的，但上游只返回相对路径（`/v1`），前端用 `location.origin` 补全 —— 面板挂在飞牛桌面域下，补出来就成了 `http://<飞牛IP>:8666/v1`（桌面端口 + 统一网关），抄过去必然连不通。网关在 `/api/overview` 的响应里把 `access.*` 换成下游端口的绝对地址（`http://<飞牛IP>:3010/v1`），前端 `absUrl()` 对绝对地址原样返回，面板上显示与复制到的就是能用的地址。
+5. **内存约束**：每个 Qoder 账号是一个常驻 Node worker，内存随账号数线性增长。网关在 `childEnv()` 里给所有 worker 注入 `NODE_OPTIONS=--max-old-space-size=...`（见 §5.3），这是 fpk 路径上唯一可用的内存闸门——fnOS 的 `config/resource` 与 `manifest` 都没有内存上限字段。
+6. **接入地址纠偏**：控制台「API 接入」页的地址是给外部客户端抄的，但上游只返回相对路径（`/v1`），前端用 `location.origin` 补全 —— 面板挂在飞牛桌面域下，补出来就成了 `http://<飞牛IP>:8666/v1`（桌面端口 + 统一网关），抄过去必然连不通。网关在 `/api/overview` 的响应里把 `access.*` 换成下游端口的绝对地址（`http://<飞牛IP>:3010/v1`），前端 `absUrl()` 对绝对地址原样返回，面板上显示与复制到的就是能用的地址。
 
 ### 控制台的子路径适配为什么改产物
 
@@ -112,7 +113,7 @@ cli2api-<版本>-1-arm64.fpk
 | 依赖 | 说明 |
 |---|---|
 | Python 3.8+ | 运行 `build.py` |
-| Go 1.25+ | 交叉编译 fngateway 与上游 cli2api |
+| Go 1.27+ | 交叉编译 fngateway 与上游 cli2api |
 | Node.js / npm | 拉取 worker 的 npm 依赖包 |
 | 网络（首次） | 拉取上游源码与 npm 包；可用 `--skip-upstream` 复用缓存 |
 
@@ -140,7 +141,7 @@ python build.py --skip-upstream      # 复用已下载的上游源码
 python build.py --package-only       # 跳过编译，只重新打包
 python build.py --no-sharp           # 不打包 sharp/libvips（省约 17MB 解包体积）
 python build.py --force              # 强制重新下载上游与 npm 包
-python build.py --version 0.6.11-2   # 覆盖版本号
+python build.py --version 0.6.13-1   # 覆盖版本号
 ```
 
 首次构建约需数分钟（主要是下载两个 Qoder CLI 组件包，合计约 57MB）。npm 包会缓存在 `.local-build/`，重复构建不重复下载。
@@ -177,7 +178,7 @@ python assets/render-icons.py        # 重新生成 ICON.PNG / ICON_256.PNG / ap
 
 ```bash
 # 安装
-appcenter-cli install-fpk cli2api-0.6.11-1-amd64.fpk
+appcenter-cli install-fpk cli2api-0.6.13-1-amd64.fpk
 
 # 查看状态 / 启停
 appcenter-cli list
@@ -216,7 +217,45 @@ curl http://<飞牛IP>:3010/v1/chat/completions \
 >
 > 控制台「API 接入」页显示/复制的地址已经是上面这个下游端口（网关改写了 `/api/overview` 的 `access` 字段，见 §1）。若你看到的是 `:8666`（飞牛桌面端口），说明装的是旧包。
 
-### 5.3 数据与日志位置
+### 5.3 内存占用与调优
+
+**每个启用的 Qoder 账号 = 一个常驻 Node worker 进程**，内存随账号数线性增长。实测（arm64 / 4GB 设备，2 个账号空闲）：
+
+| 进程 | RSS |
+|---|---|
+| `node .../worker/src/daemon.mjs`（账号 1） | ≈ 511 MB |
+| `node .../worker/src/daemon.mjs`（账号 2） | ≈ 512 MB |
+| `cli2api-linux-arm64`（上游，含账号编排） | ≈ 31 MB |
+| `fngateway-linux-arm64`（网关适配层） | ≈ 11 MB |
+
+即 **两个账号 ≈ 1.0 GB 都花在 Node worker 上**，Go 侧两个进程合计仅 ~42 MB。
+
+每个 worker 的固定开销来自：把整个 `qodercli.js` bundle 读入并编译、一个常驻的 WASM 上下文、以及模型目录快照；该 WASM 上下文**设计上不释放**（`worker/src/daemon.mjs` 的 `sealContext()` 主动封掉 `free()`），因此内存不会随空闲回落。
+
+自 `0.6.13-1` 起，网关会给每个 worker 注入 V8 老生代上限：
+```bash
+# 默认 384（MB），每个账号一份，不是总量
+NODE_OPTIONS=--max-old-space-size=384
+```
+
+可用环境变量覆盖（0 = 不注入，回退 Node 按物理内存自算的默认值）：
+
+```bash
+QODER_WORKER_MAX_OLD_SPACE_MB=256      # 2GB 设备建议
+QODER_WORKER_MAX_OLD_SPACE_MB=384      # 4GB 设备建议（默认）
+QODER_WORKER_MAX_OLD_SPACE_MB=512      # 8GB+ 设备建议
+QODER_WORKER_MAX_OLD_SPACE_MB=0        # 关闭注入
+```
+
+生效值会写进 `${TRIM_PKGVAR}/panel.log`（`Worker 堆上限:` 一行）。
+
+> **别指望它把 511MB 的基线压下去。** 实测空闲 RSS 511MB 远低于 Node 在 4GB 设备上的默认堆上限（约 2GB），说明**当前占用的大头不是 JS 堆，而是 WASM 实例与 bundle 编译产物**——这些不计入 `--max-old-space-size`。该上限的作用是**兜底**：防止 JS 堆侧随时间无界增长（例如 `daemon.mjs` 的 `rewarmContext()` 会新建 WASM 上下文，而旧上下文的 `free()` 已被 `sealContext()` 封掉），避免把 3.9GB 设备拖进 swap 死亡螺旋。
+
+> **也不是硬上限**：`--max-old-space-size` 只管 V8 老生代，WASM linear memory / ArrayBuffer 属于 external，不计数。设得过小会让 worker OOM 退出并被 `internal/runtime` 反复重启（日志里出现 `JavaScript heap out of memory`），此时上调该值。
+
+**真正能按比例省内存的只有一条：减少同时启用的账号数。** 在控制台禁用不常用的账号会直接停掉对应 worker（`SyncAccount` 的 `true→false` 分支），内存即时归还（每个省 ~511MB）。若这台 3.9GB 设备不是每天都两个账号并发用，把不常用的那个平时禁用是最有效的做法。
+
+### 5.4 数据与日志位置
 
 | 内容 | 路径 |
 |---|---|
@@ -247,7 +286,7 @@ curl http://<飞牛IP>:3010/v1/chat/completions \
 
 ## 7. 上游与许可
 
-上游仓库：[`caigee-cmd/cli2api`](https://github.com/caigee-cmd/cli2api)，当前锁定 **v0.6.11**。
+上游仓库：[`caigee-cmd/cli2api`](https://github.com/caigee-cmd/cli2api)，当前锁定 **v0.6.13**。
 版本升级时需同步修改 `build.py` 的 `UPSTREAM_TAG`，并复核 worker 的 CLI 兼容探针。
 
 随包组件的许可随包附带（见打包产物中的 `UPSTREAM.txt` 与 `LICENSE.upstream`）：

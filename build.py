@@ -56,9 +56,9 @@ CACHE_FILE = os.path.join(BUILD_DIR, "versions.json")
 
 APP_NAME = "cli2api"
 
-# --- 上游（版本与 manifest 的 0.6.11-N 对应，只用 tag，不用 master）---
+# --- 上游（版本与 manifest 的 0.6.13-N 对应，只用 tag，不用 master）---
 UPSTREAM_REPO = "caigee-cmd/cli2api"
-UPSTREAM_TAG = "v0.6.11"
+UPSTREAM_TAG = "v0.6.13"
 
 # --- 与飞牛侧的契约（build.py 里集中一份，用 check_consistency() 与各文件比对）---
 GATEWAY_PREFIX = "/app/cli2api"
@@ -531,7 +531,7 @@ def build_binaries(arch):
 
     log(f"  编译上游 cli2api ({arch}) ...")
     out = os.path.join(BIN_CACHE, f"cli2api-linux-{arch}")
-    # 版本号用上游 tag（0.6.11）而不是 fnOS 包版本（0.6.11-1）: 上游控制台的
+    # 版本号用上游 tag（0.6.13）而不是 fnOS 包版本（0.6.13-1）: 上游控制台的
     # 更新检查会拿它跟 GitHub release 比，带 -1 后缀可能被判成「更新」而误报。
     run(["go", "build", "-trimpath",
          "-ldflags",
@@ -1194,7 +1194,16 @@ def main():
         if os.path.exists(raw):
             os.remove(raw)
         log(f"  fnpack build ({a}) ...")
-        proc = subprocess.run([fnpack, "build", "-d", "."], cwd=STAGE_DIR, capture_output=True)
+        # fnpack 会在系统临时目录下建 fnpack.<时间戳>/ 当工作目录。受限环境下这一步
+        # 可能被直接拒绝（报 `Create tmp dir ...: Access is denied`，而同一路径用
+        # Python/资源管理器都能建 —— 不是目录 ACL 的问题），打包就此中断。把它的
+        # TMP/TEMP 收进 .local-build/ 内既绕开该问题，也不在系统临时目录留几十 MB
+        # 解包残留；只作用于 fnpack 子进程，不影响别处。
+        fnpack_tmp = os.path.join(BUILD_DIR, "fnpack-tmp")
+        os.makedirs(fnpack_tmp, exist_ok=True)
+        fnpack_env = dict(os.environ, TMP=fnpack_tmp, TEMP=fnpack_tmp)
+        proc = subprocess.run([fnpack, "build", "-d", "."], cwd=STAGE_DIR,
+                              capture_output=True, env=fnpack_env)
         out_text = ((proc.stdout or b"") + (proc.stderr or b"")).decode("utf-8", "replace")
         if not os.path.exists(raw):
             log(f"  ERROR: fnpack 失败\n{out_text[:1500]}")
