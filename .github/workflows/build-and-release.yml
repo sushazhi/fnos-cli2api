@@ -135,8 +135,11 @@ jobs:
           fi
           git commit -m "chore: 同步上游 ${{ steps.upstream.outputs.tag }}（包版本 ${{ steps.upstream.outputs.version }}）"
           # 构建要十几分钟，期间 main 可能被别人推进过；先 rebase 再推，
-          # 避免 non-fast-forward 直接失败。真冲突就停下交人工判断，不强行覆盖。
-          git pull --rebase origin main
+          # 避免 non-fast-forward 直接失败。用 fetch+rebase 而不是 pull --rebase，
+          # 因为 checkout 可能停在 detached HEAD 上（那种情况 pull 会直接报错）。
+          # 真冲突就停下交人工判断，不强行覆盖。
+          git fetch origin main
+          git rebase origin/main
           git push origin HEAD:main
 
       - name: 收集构建产物
