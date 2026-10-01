@@ -4,7 +4,7 @@
     "items": [
       {
         "type": "tips",
-        "helpText": "把 <b>Qoder CLI</b> 包装成 <b>OpenAI 兼容 API</b>（上游 cli2api），并自带官方 Web 控制台。<br>Qoder 运行组件随包携带，<b>无需 Docker、无需另行部署</b>，安装即可用。"
+        "helpText": "把 <b>多提供商账号池</b>包装成 <b>OpenAI 兼容 API</b>（上游 cli2api），并自带官方 Web 控制台。<br>以 <b>WorkBuddy</b> 为主力渠道（国内版 / 国际版），并支持 <b>Qoder 国际版 / 国内版</b>、<b>Trae 国内版 Work</b>，以及实验性的 <b>Devin</b> 与 <b>Command Code</b>。<br>Qoder 运行组件随包携带，<b>无需 Docker、无需另行部署</b>，安装即可用。"
       },
       {
         "type": "tips",
@@ -12,11 +12,11 @@
       },
       {
         "type": "tips",
-        "helpText": "🧩 <b>运行时依赖</b>：Qoder 账号由内置 Node worker 驱动，依赖应用中心的 <b>Node.js 运行时（nodejs_v24）</b>，安装本应用时会自动带上。<br>支持 Qoder 国内区与全球区账号，两区 CLI 组件均已随包。"
+        "helpText": "🧩 <b>运行时依赖</b>：<b>Qoder 渠道</b>的账号由内置 Node worker 驱动，依赖应用中心的 <b>Node.js 运行时（nodejs_v24）</b>，安装本应用时会自动带上。<br>其余渠道（WorkBuddy / Trae / Devin / Command Code / Codex）在 Go 进程内直连上游，不额外占用常驻内存。<br>Qoder 支持国内区与全球区账号，两区 CLI 组件均已随包。"
       },
       {
         "type": "tips",
-        "helpText": "⚠️ <b>使用前提</b>：需自备已获授权的 Qoder 账号。本应用仅用于私有环境下的个人账号管理，请遵守上游服务条款。"
+        "helpText": "⚠️ <b>使用前提</b>：需自备已获授权的上游账号（WorkBuddy / Qoder / Trae 等）。本应用仅用于私有环境下的个人账号管理，请遵守对应平台的服务条款。"
       }
     ]
   }

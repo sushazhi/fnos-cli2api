@@ -1,12 +1,27 @@
 # fnos-cli2api
 
-把 [cli2api](https://github.com/caigee-cmd/cli2api)（Qoder CLI → OpenAI 兼容 API 网关）打包成**飞牛 fnOS 原生应用**。
+把 [cli2api](https://github.com/caigee-cmd/cli2api)（**多提供商账号池 → OpenAI 兼容 API 网关**）打包成**飞牛 fnOS 原生应用**（`.fpk`）：上游 Go 服务原样编译，外套一层本项目新增的统一网关适配层 `fngateway`。
 
-- **零源码改动**：上游 Go 服务原样编译，控制台静态资源直接使用上游仓库内已提交的产物（无需前端构建）。
-- **统一网关接入**：面板走 `/app/cli2api`，复用飞牛登录态，仅管理员可访问。
-- **下游独立端口**：`3010`（上游默认端口），标准 OpenAI SDK 直连。
+渠道由上游的 provider 注册表决定，本打包层不做增删。上游在 **WorkBuddy** 上投入最多（国内版 / 国际版，且是唯一带 **token 保活**与**积分包到期**处理的一家），Qoder 则是唯一需要按账号拉起 Node worker 的一家：
+
+| 渠道 | 区域 | 登录 / 导入 | 运行时 |
+|---|---|---|---|
+| **WorkBuddy** | 国内版 / 国际版 | 浏览器 OAuth | 进程内适配器 |
+| **Qoder** | 国际版 / 国内版 | 浏览器 OAuth、PAT | **每账号一个 Node worker** |
+| Trae Work | 国内版 | 浏览器 OAuth | 进程内适配器 |
+| Devin（实验性） | 国际版 | 浏览器 OAuth、导入 session | 进程内适配器 |
+| Command Code（实验性） | 国际版 | 粘贴 `user_…` 密钥 | 进程内适配器 |
+| Codex | 国际版 | 浏览器 OAuth | 进程内适配器 |
+
+> Devin / Command Code 沿用上游口径：**实验性接入，不承诺生产可用**。上游同时标注 Qoder 国内版、WorkBuddy、Trae 的「真实账号验收」尚未完成；本机实测跑通的是 Qoder 国际/国内、WorkBuddy 国际/国内、Trae 国内（见 `docs/agent2api-vs-cli2api-评估.md`）。
+
+- **零源码改动**：上游 Go 服务原样编译，控制台静态资源直接使用上游仓库内已提交的产物（无需前端构建）。唯一的例外是 `build.py` 在编译前对控制台产物打的一处**构建期子路径补丁**（原因见 §1）。
+- **统一网关接入**：控制台挂 `/app/cli2api`，复用飞牛登录态，**免密登录**——控制台密钥由网关在服务端从 `qoder.db` 读出并注入，密钥不下发到浏览器；仅管理员可访问。
+- **下游独立端口**：`3010`（上游默认端口），标准 OpenAI SDK 直连，只放行 `/v1/*` 与 `/health`。
+- **账号池调度**：多账号加权轮转、失败重试、熔断与冷却；跨渠道同名模型可调度（`CROSS_PROVIDER_MODEL_POOL`），也可用 `qoder/<model>` 这类前缀钉死单一渠道。
 - **上游官方图标**：应用图标取自上游仓库 `frontend/public/apple-touch-icon.svg`，由 `assets/render-icons.py` 栅格化。
-- **随包携带运行时**：Qoder CLI 国内区 + 全球区组件、ripgrep 原生库、sharp/libvips 原生库全部随包，安装时不联网。
+- **随包携带运行时**：Qoder CLI 国内区 + 全球区组件、ripgrep 原生库、sharp/libvips 原生库全部随包，安装时不联网；运行时只依赖应用中心的 `nodejs_v24`（只有 Qoder 渠道用它，其余五家在 Go 进程内直连上游）。
+- **构建期守卫 + 自动跟随上游**：五类校验拦截「能编过、上机就炸」的缺陷（§3.3）；GitHub Actions 每周检查上游并自动出包（§3.4）。
 
 ---
 
@@ -30,12 +45,19 @@
                 ▼
         cli2api 上游二进制（零改动）
                 │
-                │  QODER_NODE_BINARY / QODER_WORKER_DAEMON / ...
-                ▼
-        Node worker（nodejs_v24 运行时）+ Qoder CLI 组件
+        ┌───────┴───────────────────────────────┐
+        │ Qoder 渠道：每账号一个 Node 子进程     │
+        │  QODER_NODE_BINARY / ..._DAEMON / ... │
+        ▼                                       │
+        Node worker（nodejs_v24）+ Qoder CLI     │
+                                                │
+        WorkBuddy / Trae / Devin / Command /     │
+        Codex 渠道：Go 进程内适配器直连上游 ─────┘
 
 外部 OpenAI 客户端 ──→ 0.0.0.0:3010 ──→ 仅放行 /v1/* 与 /health
 ```
+
+两条运行时路径并存：**只有 Qoder 渠道**按账号拉起 Node worker（因此有 §5.3 的内存账），其余五家在 `cli2api` 进程内直接对话上游，不占额外常驻内存。
 
 ### 为什么要 fngateway 这一层
 
@@ -70,6 +92,7 @@
 fnos-cli2api/
 ├── manifest                  # fpk 清单（platform 由 build.py 按架构改写）
 ├── ICON.PNG / ICON_256.PNG   # 应用图标
+├── LICENSE                   # MIT：含上游署名与本项目打包层署名
 ├── app/
 │   └── ui/
 │       ├── config            # 桌面入口定义（.url，allUsers=false）
@@ -86,22 +109,28 @@ fnos-cli2api/
 ├── wizard/                   # 安装/升级/配置/卸载向导文案
 ├── fngateway/                # 统一网关适配层（Go，本项目的核心新增代码）
 │   ├── main.go               # 布局解析、子进程托管、双监听
-│   ├── rotate.go             # 日志轮转
-│   └── internal/
-│       ├── consolekey/       # 从 qoder.db 读控制台密钥（modernc.org/sqlite，纯 Go）
-│       └── gateway/          # 前缀剥离、Header 注入、TCP 端口门禁
+│   ├── rotate.go             # 日志轮转（单代：path → path.1）
+│   ├── internal/
+│   │   ├── consolekey/       # 从 qoder.db 读控制台密钥（modernc.org/sqlite，纯 Go）
+│   │   └── gateway/          # 前缀剥离、Header 注入、TCP 端口门禁
+│   └── devcheck/             # 本地用回环 HTTP 复现控制台链路（不参与打包）
 ├── assets/
 │   ├── apple-touch-icon.svg  # 图标真源：上游官方图标（frontend/public/apple-touch-icon.svg）
 │   ├── render-icons.py       # 由 SVG 栅格化出 64/256 图标（含尺寸与配色自检）
 │   └── icon-master.png       # 964px 设计源（由 render-icons.py 生成，不进包）
+├── scripts/
+│   └── upstream_sync.py      # CI 用：查上游新版本 + 锚点式改写版本号（仅标准库）
+├── .github/workflows/        # build-and-release.yml：每周跟随上游并出包
+├── .gitattributes            # 固定 eol=lf（cmd/* 变 CRLF 会让安装直接失败）
+├── .gitignore                # 忽略 .local-build/、__pycache__/、*.fpk
 └── build.py                  # 一键打包（拉上游 → 交叉编译 → 组装 → fnpack）
 ```
 
 **构建产物**（不入库）：
 
 ```
-cli2api-<版本>-1-amd64.fpk
-cli2api-<版本>-1-arm64.fpk
+cli2api-<包版本>-amd64.fpk      # 包版本形如 0.6.13-1（上游 tag + 打包序号）
+cli2api-<包版本>-arm64.fpk
 ```
 
 ---
@@ -200,6 +229,35 @@ python assets/render-icons.py        # 重新生成 ICON.PNG / ICON_256.PNG / ap
 **引入**的版本，不是当前版本。要新增版本引用，请按同样方式给锚点，不要改成全局替换。
 
 > 说明：Actions 的 `schedule` 在仓库连续 60 天无提交后会暂停，届时手动跑一次即可恢复。
+
+### 3.5 本地调试（无需飞牛设备）
+
+`fngateway/devcheck` 把控制台链路（前缀剥离 → HTML/重定向/Cookie 改写 → 桥接脚本
+注入 → 服务端注入控制台密钥 → 管理员门）原样挂到一个**回环 TCP 端口**上，用来在
+没有飞牛设备时复现与验证面板问题——Unix Socket 浏览器连不上，线上形态没法直接用
+浏览器打开。它不参与打包（`build.py` 只收 `app/bin/` 下的产物）。
+
+```bash
+# 1) 先按上游方式跑起 cli2api（端口与下面 -upstream 对齐）
+cd .local-build/upstream-src
+PORT=17899 QODER_NODE_BINARY=/var/apps/nodejs_v24/target/bin/node go run ./cmd/server
+
+# 2) 再跑 devcheck，指定 qoder.db（用于读取控制台密钥）
+cd fngateway
+go run ./devcheck -db ..\.local-build\devcheck\data\qoder.db
+# 浏览器打开 http://127.0.0.1:17901/app/cli2api/
+```
+
+与线上唯一的差异是身份来源：浏览器无法伪造飞牛网关注入的 `X-Trim-*`，devcheck 由
+进程自己盖上管理员章。它**强制只监听回环地址**（`-addr` 非回环直接退出），绝不可
+用于公网。
+
+改 `fngateway` 后建议先跑一遍：
+
+```bash
+cd fngateway
+gofmt -l . && go vet ./... && go test ./...
+```
 
 ---
 
@@ -317,11 +375,22 @@ QODER_WORKER_MAX_OLD_SPACE_MB=0        # 关闭注入
 
 上游仓库：[`caigee-cmd/cli2api`](https://github.com/caigee-cmd/cli2api)，当前锁定 **v0.6.13**。
 版本升级时需同步修改 `build.py` 的 `UPSTREAM_TAG`，并复核 worker 的 CLI 兼容探针。
+（`scripts/upstream_sync.py` 会按锚点自动改这一处；手动改时注意别动 §5.3 里描述
+能力**引入**版本的「自 0.6.13-1 起」。）
 
-随包组件的许可随包附带（见打包产物中的 `UPSTREAM.txt` 与 `LICENSE.upstream`）：
+本项目自身（打包层与 `fngateway`）以 MIT 发布，见仓库根目录 `LICENSE`；该文件同时
+保留上游 cli2api 的原始版权声明（MIT 再分发义务）。
 
-- cli2api / fngateway：MIT
-- Qoder CLI 组件（`@qoder-ai/qodercli`、`@qodercn-ai/qoderclicn`）：Apache-2.0
-- sharp / libvips：Apache-2.0 / LGPL-3.0
+随包第三方组件的许可随包附带（见打包产物中的 `UPSTREAM.txt` 与 `LICENSE.upstream`，
+各组件的完整许可全文在其包内 `LICENSE` / `NOTICE`）：
 
-> 本应用仅用于私有环境下的个人账号管理，需自备已获授权的 Qoder 账号，请遵守上游服务条款。
+| 组件 | 许可 |
+|---|---|
+| cli2api（上游） / fngateway（本项目） | MIT |
+| Qoder CLI 组件（`@qoder-ai/qodercli`、`@qodercn-ai/qoderclicn`） | Apache-2.0 |
+| ripgrep 原生库（`*-ripgrep-linux-*`） | MIT / Unlicense |
+| sharp | Apache-2.0 |
+| libvips（`@img/sharp-libvips-*`） | LGPL-3.0 |
+| undici（worker 运行时依赖） | MIT |
+
+> 本应用仅用于私有环境下的个人账号管理，需自备已获授权的上游账号（WorkBuddy / Qoder / Trae / Devin / Command Code / Codex 各自的服务条款），请遵守对应平台的使用条款。
