@@ -5,6 +5,9 @@ name: Build and Release
 #              构建 amd64/arm64 两个 fpk，提交推回 main，并建一个带 fpk 的 Release
 #   没新版本 → 直接跳过（不构建、不提交、不发布），流程仍是绿的
 #
+# 检查步骤排在检出之后、所有 setup-* 之前，且用 runner 自带的 python3：
+# 无更新的一次运行因此不会安装 Python/Go/Node，只花检出 + 几次 API 查询的时间。
+#
 # cron 用 UTC。这里取 04:17 UTC = 12:17 北京时间（避开整点，减少排队）。
 # day-of-week 里 0=周日，所以是「每周日一次」。
 # GitHub 的 schedule 在仓库 60 天无活动后会暂停，届时手动跑一次即可恢复。
@@ -45,25 +48,9 @@ jobs:
           # 后面要 push 回 main，用带写权限的 token 检出
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 安装 Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
-
-      - name: 安装 Go
-        uses: actions/setup-go@v7
-        with:
-          go-version: "1.27.x"
-          # 关掉 setup-go 自带的缓存：它按仓库里的 go.sum 算 key，而占大头的
-          # 上游依赖（构建时才下载到 .local-build/upstream-src）不在仓库里，
-          # 缓存基本命中不了。下面用上游 tag 当 key 自己缓存，更准。
-          cache: false
-
-      - name: 安装 Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: "24.x"
-
+      # 上游检查放在最前：没更新时连工具链安装一起跳过。
+      # 用 runner 自带的 python3（不是 setup-python 装的），所以这一步不依赖任何 setup；
+      # upstream_sync.py 只依赖标准库，不需要固定 Python 版本。
       - name: 检查上游是否有新版本
         id: upstream
         env:
@@ -74,11 +61,16 @@ jobs:
           # 说明/校验和写到 runner 临时目录，不落进仓库工作区（免得被误提交）
           NOTES_FILE="$RUNNER_TEMP/release-notes.md"
           echo "NOTES_FILE=$NOTES_FILE" >> "$GITHUB_ENV"
-          python scripts/upstream_sync.py check \
+          python3 scripts/upstream_sync.py check \
             --repo "$GITHUB_REPOSITORY" \
             --github-output "$GITHUB_OUTPUT" \
             --notes-out "$NOTES_FILE" \
             ${FORCE_FLAG}
+
+      # 摘要必须单独一步：steps 上下文只含**已跑完**步骤的 output，
+      # 写在「检查上游」自己的 run 块里会在步骤开始前就被渲染成空值。
+      - name: 记录上游检查结果
+        run: |
           {
             echo "### 上游检查"
             echo ""
@@ -86,6 +78,29 @@ jobs:
             echo "- 上游 tag：\`${{ steps.upstream.outputs.tag }}\`"
             echo "- 包版本：\`${{ steps.upstream.outputs.version }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # 以下三步只在确实要构建时执行：无更新的运行到此为止，不装任何工具链。
+      - name: 安装 Python
+        if: steps.upstream.outputs.changed == 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: 安装 Go
+        if: steps.upstream.outputs.changed == 'true'
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+          # 关掉 setup-go 自带的缓存：它按仓库里的 go.sum 算 key，而占大头的
+          # 上游依赖（构建时才下载到 .local-build/upstream-src）不在仓库里，
+          # 缓存基本命中不了。下面用上游 tag 当 key 自己缓存，更准。
+          cache: false
+
+      - name: 安装 Node
+        if: steps.upstream.outputs.changed == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24.x"
 
       # Go 模块缓存按上游 tag 分桶：tag 变了说明依赖可能变，自然换一份新缓存，
       # 不会拿旧依赖去编译新源码。恢复不到只是慢一点，不影响正确性。

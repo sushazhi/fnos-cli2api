@@ -187,6 +187,10 @@ python assets/render-icons.py        # 重新生成 ICON.PNG / ICON_256.PNG / ap
 
 顺序上「先构建、后提交」是有意的：`main` 上不会出现"版本号已改但构建不出来"的提交。
 
+检查步骤排在检出之后、所有 `setup-*` 之前，并用 runner 自带的 `python3`
+（`upstream_sync.py` 只依赖标准库，不需要固定 Python 版本）。所以「无更新」的一次
+运行不会安装 Python / Go / Node，只花检出 + 几次 API 查询的时间。
+
 手动触发时的 `force` 选项会忽略上游比较、按仓库里已锁定的版本重新出包；若上游
 此时正好有更新的版本，会顺带把新版本一起带上，不会反而重发旧版本。
 
