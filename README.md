@@ -174,8 +174,8 @@ python assets/render-icons.py        # 重新生成 ICON.PNG / ICON_256.PNG / ap
 
 ### 3.4 自动跟随上游（GitHub Actions）
 
-`.github/workflows/build-and-release.yml` 每 2 天跑一次（cron `17 4 */2 * *`，UTC，
-即北京时间 12:17；也可在 Actions 页面手动触发）：
+`.github/workflows/build-and-release.yml` 每周一/三/五/日跑一次（cron
+`17 4 * * 0,1,3,5`，UTC，即北京时间 12:17；也可在 Actions 页面手动触发）：
 
 1. `scripts/upstream_sync.py check` 查上游最新正式 Release，与 `build.py` 的
    `UPSTREAM_TAG` 比较。

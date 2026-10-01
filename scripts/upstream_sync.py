@@ -45,6 +45,8 @@ bump
     python scripts/upstream_sync.py bump --tag v0.6.14
     python scripts/upstream_sync.py bump --tag v0.6.14 --notes-file notes.md
     python scripts/upstream_sync.py bump --tag v0.6.14 --root /tmp/copy --dry-run
+
+``--root`` 写在子命令**前**或**后**都可以，两种写法等价。
 """
 
 from __future__ import annotations
@@ -573,17 +575,32 @@ def cmd_bump(args):
 # CLI
 # ---------------------------------------------------------------------------
 
+def _add_root_arg(parser, suppress_default=False):
+    """给主解析器和各子命令都挂上 --root，让「写在子命令前」和「写在子命令后」都成立。
+
+    子命令上的那一份用 SUPPRESS 当默认值：argparse 只在属性不存在时才填默认值，
+    而主解析器已经把 root 放进 namespace 了，所以「子命令没给 --root」时不会把
+    主解析器的值覆盖掉。两种写法因此等价，不再是「写错位置就 unrecognized
+    arguments」。
+    """
+    parser.add_argument(
+        "--root",
+        default=argparse.SUPPRESS if suppress_default else str(DEFAULT_ROOT),
+        help="仓库根目录（默认按脚本位置推断；写在子命令前或后都可以）",
+    )
+
+
 def main():
     _force_utf8_streams()
     ap = argparse.ArgumentParser(
         description="上游版本同步（检测 + 落地）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--root", default=str(DEFAULT_ROOT),
-                    help="仓库根目录（默认按脚本位置推断）")
+    _add_root_arg(ap)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p_check = sub.add_parser("check", help="查上游是否有新版本")
+    _add_root_arg(p_check, suppress_default=True)
     p_check.add_argument("--github-output", default="",
                          help="把 changed/reason/tag/version 追加写入该文件（$GITHUB_OUTPUT）")
     p_check.add_argument("--repo", default="",
@@ -596,6 +613,7 @@ def main():
     p_check.set_defaults(func=cmd_check)
 
     p_bump = sub.add_parser("bump", help="把指定上游 tag 落进仓库文件")
+    _add_root_arg(p_bump, suppress_default=True)
     p_bump.add_argument("--tag", required=True, help="新的上游 tag，例如 v0.6.14")
     p_bump.add_argument("--notes-file", default="",
                         help="changelog 素材（上游 Release body 或纯条目）；缺省时自行拉取")
