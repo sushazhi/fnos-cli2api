@@ -1,31 +1,52 @@
 name: Build and Release
 
-# 每周日检查一次上游 caigee-cmd/cli2api：
-#   有新版本 → 改 build.py 的 UPSTREAM_TAG + manifest 版本与 changelog + README，
-#              构建 amd64/arm64 两个 fpk，提交推回 main，并建一个带 fpk 的 Release
-#   没新版本 → 直接跳过（不构建、不提交、不发布），流程仍是绿的
+# 构建 fnOS 应用包（.fpk）并挂到 GitHub Release 上。
 #
-# 检查步骤排在检出之后、所有 setup-* 之前，且用 runner 自带的 python3：
-# 无更新的一次运行因此不会安装 Python/Go/Node，只花检出 + 几次 API 查询的时间。
+# ── 触发方式 ──────────────────────────────────────────────────
+#   · workflow_dispatch（ref = tag）：**自动升级走的就是这条路**。
+#     由 check-upstream.yml 在「定时检查发现上游新版本 → 改版本号 → 提交 main →
+#     打 tag」之后派发过来，ref 就是刚打的那个 tag。
+#   · push tag v*：人工手动推 tag 时等价生效（构建 + 发布）。
+#     注意用内置 GITHUB_TOKEN 推的 tag **不会**触发这里（GitHub 防递归规则），
+#     只有 workflow_dispatch / repository_dispatch 两个事件例外 —— 所以自动升级
+#     必须靠上面那条「派发」。详见 check-upstream.yml 的文件头。
+#   · workflow_dispatch（ref = 分支）：只构建，产物作为 artifact 下载，不发布
+#     Release（github.ref 不是 refs/tags/*，Release 步骤自动跳过）。
+#     要在此情况下也发布，勾 force_release。
 #
-# cron 用 UTC。这里取 04:17 UTC = 12:17 北京时间（避开整点，减少排队）。
-# day-of-week 里 0=周日，所以是「每周日一次」。
-# GitHub 的 schedule 在仓库 60 天无活动后会暂停，届时手动跑一次即可恢复。
+# ── 与旧版（检查 + 构建 + 发布挤在一个 workflow 里）的差别 ───────
+# 检查与改版本号的部分搬到了 check-upstream.yml，这里只剩「构建 + 发布」。
+# 好处是发布路径只有一份、职责清晰；代价是「先构建、后提交」那个保证没有了
+# （版本号在派发之前就已经提交进 main）。兜底见 check-upstream.yml 的
+# 「幂等 / 自愈」一节：万一这里失败，下次定时检查会发现「tag 在、Release 不在」
+# 并自动补一次派发；也可以随时手动重跑本 workflow、ref 填该 tag。
+#
+# ── 发布说明 ──────────────────────────────────────────────────
+# 直接用 manifest 的 changelog —— 它只保留**最新一版**的记录（见
+# scripts/upstream_sync.py 的 bump_manifest），正好就是本次发布的更新日志。
+#
+# ── 发布用的凭据 ──────────────────────────────────────────────
+# 用 Actions 内置的 secrets.GITHUB_TOKEN，不需要额外配 PAT —— 顶层
+# permissions: contents: write 已经给它 Release 写权限。
+
 on:
-  schedule:
-    - cron: "17 4 * * 0"
+  push:
+    tags: [ 'v*' ]
   workflow_dispatch:
     inputs:
-      force:
-        description: "忽略上游比较，重新出一次包（若上游已有更新版本，会顺带带上新版本）"
+      # 网页手动触发时 ref 只能选分支或 tag。选分支时 github.ref 不是
+      # refs/tags/*，下面「创建 Release」默认跳过 —— 这个开关用来在分支上
+      # 也发一版（tag 名取 manifest 里的版本号，去掉 -N 后缀）。
+      force_release:
+        description: '即使在分支上也创建 Release（tag 用 manifest 里的版本号）'
         type: boolean
         default: false
 
-# 需要写权限：提交版本号回 main、创建 Release、上传 Release 资产
+# 需要写权限：创建 Release、上传 Release 资产
 permissions:
   contents: write
 
-# 两次运行重叠会互相抢 commit/Release；排队而不是取消，避免半截状态
+# 两次运行重叠会互相抢同一个 Release；排队而不是取消，避免半截状态
 concurrency:
   group: build-and-release
   cancel-in-progress: false
@@ -37,57 +58,67 @@ env:
 
 jobs:
   build:
-    name: 检查上游 / 构建 / 发布
+    name: 构建 / 发布
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - name: 检出仓库
         uses: actions/checkout@v7
         with:
+          # 要按 tag 检出并核对 tag 指向的提交，浅克隆不够用
           fetch-depth: 0
-          # 后面要 push 回 main，用带写权限的 token 检出
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 上游检查放在最前：没更新时连工具链安装一起跳过。
-      # 用 runner 自带的 python3（不是 setup-python 装的），所以这一步不依赖任何 setup；
-      # upstream_sync.py 只依赖标准库，不需要固定 Python 版本。
-      - name: 检查上游是否有新版本
-        id: upstream
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FORCE_FLAG: ${{ github.event_name == 'workflow_dispatch' && inputs.force && '--force' || '' }}
+      # 版本号一律以仓库里的 manifest 为准（check-upstream.yml 已经把它改成
+      # 目标版本，并提交在 tag 指向的提交里）。
+      - name: 读取版本号
+        id: ver
         run: |
           set -euo pipefail
-          # 说明/校验和写到 runner 临时目录，不落进仓库工作区（免得被误提交）
-          NOTES_FILE="$RUNNER_TEMP/release-notes.md"
-          echo "NOTES_FILE=$NOTES_FILE" >> "$GITHUB_ENV"
-          python3 scripts/upstream_sync.py check \
-            --repo "$GITHUB_REPOSITORY" \
-            --github-output "$GITHUB_OUTPUT" \
-            --notes-out "$NOTES_FILE" \
-            ${FORCE_FLAG}
+          # 都带 || true：开了 pipefail 时 grep 找不到会因非零状态把整行赋值打挂，
+          # 那样会以一句莫名其妙的 shell 报错收场；下面显式判空，报错更清楚。
+          APP_VERSION=$(grep '^version[[:space:]]*=' manifest | sed 's/^version[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]' || true)
+          UPSTREAM_TAG=$(grep '^UPSTREAM_TAG[[:space:]]*=' build.py | sed 's/^UPSTREAM_TAG[[:space:]]*=[[:space:]]*//' | tr -d '[:space:]"' || true)
+          if [ -z "$APP_VERSION" ]; then
+            echo "ERROR: 读不到 manifest 的 version"
+            exit 1
+          fi
+          echo "version=$APP_VERSION"       >> "$GITHUB_OUTPUT"
+          echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+          echo "包版本 $APP_VERSION（上游 $UPSTREAM_TAG）"
 
-      # 摘要必须单独一步：steps 上下文只含**已跑完**步骤的 output，
-      # 写在「检查上游」自己的 run 块里会在步骤开始前就被渲染成空值。
-      - name: 记录上游检查结果
+      # 发布用的 tag：优先用触发的 ref（派发时是 tag）；在分支上手动跑且勾了
+      # force_release 时，用 manifest 版本号去掉 -N 后缀拼一个。
+      - name: 决定发布 tag
+        id: tag
+        env:
+          FORCE_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.force_release || false }}
+          APP_VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          {
-            echo "### 上游检查"
-            echo ""
-            echo "- 是否需要构建：\`${{ steps.upstream.outputs.changed }}\`（原因：${{ steps.upstream.outputs.reason }}）"
-            echo "- 上游 tag：\`${{ steps.upstream.outputs.tag }}\`"
-            echo "- 包版本：\`${{ steps.upstream.outputs.version }}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          case "${GITHUB_REF}" in
+            refs/tags/*)
+              TAG="${GITHUB_REF#refs/tags/}"
+              echo "触发 ref 就是 tag：${TAG}"
+              ;;
+            *)
+              if [ "${FORCE_RELEASE}" = "true" ]; then
+                TAG="v${APP_VERSION%-*}"
+                echo "在分支 ${GITHUB_REF} 上强制发布，tag 取 manifest 版本号：${TAG}"
+              else
+                TAG=""
+                echo "ref=${GITHUB_REF} 不是 tag 且未勾 force_release —— 只构建，不发布"
+              fi
+              ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      # 以下三步只在确实要构建时执行：无更新的运行到此为止，不装任何工具链。
       - name: 安装 Python
-        if: steps.upstream.outputs.changed == 'true'
         uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
       - name: 安装 Go
-        if: steps.upstream.outputs.changed == 'true'
         uses: actions/setup-go@v7
         with:
           go-version: "1.27.x"
@@ -97,7 +128,6 @@ jobs:
           cache: false
 
       - name: 安装 Node
-        if: steps.upstream.outputs.changed == 'true'
         uses: actions/setup-node@v7
         with:
           node-version: "24.x"
@@ -105,96 +135,94 @@ jobs:
       # Go 模块缓存按上游 tag 分桶：tag 变了说明依赖可能变，自然换一份新缓存，
       # 不会拿旧依赖去编译新源码。恢复不到只是慢一点，不影响正确性。
       - name: 缓存 Go 模块
-        if: steps.upstream.outputs.changed == 'true'
         uses: actions/cache@v6
         with:
           path: ~/go/pkg/mod
-          key: gomod-${{ runner.os }}-${{ steps.upstream.outputs.tag }}-${{ hashFiles('fngateway/go.sum') }}
+          key: gomod-${{ runner.os }}-${{ steps.ver.outputs.upstream_tag }}-${{ hashFiles('fngateway/go.sum') }}
           restore-keys: |
-            gomod-${{ runner.os }}-${{ steps.upstream.outputs.tag }}-
+            gomod-${{ runner.os }}-${{ steps.ver.outputs.upstream_tag }}-
             gomod-${{ runner.os }}-
 
-      - name: 无更新，跳过
-        if: steps.upstream.outputs.changed != 'true'
-        run: |
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "上游无新版本，本次不构建、不提交、不发布。" >> "$GITHUB_STEP_SUMMARY"
-
-      # release-missing 场景下 tag 与当前锁定相同，bump 会识别为"无需更新"直接返回，
-      # 只重建重发，不会改坏仓库文件。
-      - name: 同步版本号到仓库文件
-        if: steps.upstream.outputs.changed == 'true'
-        run: |
-          set -euo pipefail
-          python scripts/upstream_sync.py bump \
-            --tag "${{ steps.upstream.outputs.tag }}" \
-            --notes-file "$NOTES_FILE"
-
       - name: 构建 fpk（amd64 + arm64）
-        if: steps.upstream.outputs.changed == 'true'
         run: |
           set -euo pipefail
           python build.py --arch all
 
-      # 顺序很关键：先把包建出来，确认能构建，再把版本号提交回 main。
-      # 否则 main 上会留下一个"版本号已改但根本构建不出来"的提交。
-      - name: 提交版本号并推回 main
-        if: steps.upstream.outputs.changed == 'true'
-        run: |
-          set -euo pipefail
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898382+github-actions[bot]@users.noreply.github.com"
-          git add build.py manifest README.md
-          if git diff --cached --quiet; then
-            echo "仓库文件无变化（补发场景），跳过提交" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          git commit -m "chore: 同步上游 ${{ steps.upstream.outputs.tag }}（包版本 ${{ steps.upstream.outputs.version }}）"
-          # 构建要十几分钟，期间 main 可能被别人推进过；先 rebase 再推，
-          # 避免 non-fast-forward 直接失败。用 fetch+rebase 而不是 pull --rebase，
-          # 因为 checkout 可能停在 detached HEAD 上（那种情况 pull 会直接报错）。
-          # 真冲突就停下交人工判断，不强行覆盖。
-          git fetch origin main
-          git rebase origin/main
-          git push origin HEAD:main
-
       - name: 收集构建产物
-        if: steps.upstream.outputs.changed == 'true'
         run: |
           set -euo pipefail
           ls -l ./*.fpk
-          # 放在工作区根目录：这一步在「提交」之后，不会被提交进去
           sha256sum ./*.fpk > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      # 同一 tag 重复发布会因"已存在"失败，留下 tag/Release 不一致；先删再建。
-      # tag 用的是上游 tag（v0.6.14 这种），和上游版本一一对应，便于对照。
+      # 同一 tag 重复发布（重跑、补发）会因「已存在」失败，留下 tag/Release
+      # 不一致；先删再建。**不带 --cleanup-tag**：tag 要留着，check-upstream.yml
+      # 靠「tag 在、Release 不在」判断是否需要自愈补发，删掉 tag 这条线索就断了。
       - name: 创建 Release
-        if: steps.upstream.outputs.changed == 'true'
+        if: steps.tag.outputs.tag != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VER: ${{ steps.ver.outputs.version }}
+          UPSTREAM_TAG: ${{ steps.ver.outputs.upstream_tag }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.upstream.outputs.tag }}"
-          VER="${{ steps.upstream.outputs.version }}"
-          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-          if [ -s "$NOTES_FILE" ]; then
-            BODY_ARGS=(--notes-file "$NOTES_FILE")
-          else
-            BODY_ARGS=(--generate-notes)
+          gh release delete "$TAG" --yes 2>/dev/null || true
+
+          # 发布说明取 manifest 的 changelog（只含最新一版），把 <br> 还原成换行。
+          # 末尾的 || true 是为了配合 set -o pipefail：grep 找不到不该以 shell
+          # 报错收场，下面显式判空。
+          NOTES=$(grep '^changelog[[:space:]]*=' manifest \
+                  | sed 's/^changelog[[:space:]]*=[[:space:]]*//' \
+                  | sed 's/<br>/\n/g' || true)
+          if [ -z "$NOTES" ]; then
+            echo "ERROR: manifest 里读不到 changelog，拒绝发一个没有说明的 Release"
+            exit 1
           fi
+          {
+            echo "## cli2api ${VER}（上游 ${UPSTREAM_TAG}）"
+            echo
+            echo "$NOTES"
+            echo
+            echo "---"
+            echo
+            echo "上游仓库：[\`caigee-cmd/cli2api\`](https://github.com/caigee-cmd/cli2api)（锁定 \`${UPSTREAM_TAG}\`）"
+            echo
+            echo "| 文件 | 说明 |"
+            echo "| --- | --- |"
+            echo "| \`cli2api-${VER}-amd64.fpk\` | x86_64 |"
+            echo "| \`cli2api-${VER}-arm64.fpk\` | ARM64 |"
+            echo "| \`SHA256SUMS.txt\` | 校验和 |"
+          } > "$RUNNER_TEMP/release-notes.md"
+
           gh release create "$TAG" \
-            --title "cli2api $VER（上游 $TAG）" \
-            "${BODY_ARGS[@]}" \
+            --title "cli2api $VER（上游 $UPSTREAM_TAG）" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
             ./*.fpk SHA256SUMS.txt
 
       # 发布用的资产之外再留一份 Actions 产物，方便排查和重发
       - name: 上传构建产物
-        if: steps.upstream.outputs.changed == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: fpk-${{ steps.upstream.outputs.version }}
+          name: fpk-${{ steps.ver.outputs.version }}
           path: |
             *.fpk
             SHA256SUMS.txt
           retention-days: 14
+
+      - name: 记录结果
+        if: always()
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+          UPSTREAM_TAG: ${{ steps.ver.outputs.upstream_tag }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          {
+            echo "## 构建发布结果"
+            echo
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 包版本 | \`${VER:-n/a}\` |"
+            echo "| 上游 tag | \`${UPSTREAM_TAG:-n/a}\` |"
+            echo "| 发布 tag | \`${TAG:-（不发布）}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

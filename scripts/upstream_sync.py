@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """上游版本同步：检测 caigee-cmd/cli2api 的新 Release，并把版本落进本仓库。
 
-只依赖标准库，供 .github/workflows/build-and-release.yml 调用，也可以本地单跑。
+只依赖标准库，供 .github/workflows/check-upstream.yml 调用（check / bump /
+trim-changelog 都在那边跑），也可以本地单跑。
 
 子命令
 ------
@@ -23,20 +24,28 @@ check
     ``changed`` 不只看上游：本仓库若还没有当前版本的 Release（例如上一次运行
     改好了文件、构建或发布却失败了），也会置为 true，好让构建发布流程补上。
 
-    ``--notes-out FILE`` 可把上游 Release 正文原文写到文件，供创建本仓库
-    Release 时当发布说明用（拿不到就写空文件，不阻塞构建）。
+    ``--notes-out FILE`` 可把上游 Release 正文原文写到文件，供 ``bump
+    --notes-file`` 当 changelog 素材（拿不到就写空文件，不阻塞流程）。
 
 bump
     把指定上游 tag 落进仓库文件：
 
     * ``build.py``   ``UPSTREAM_TAG`` 及两处说明性注释
-    * ``manifest``   ``version = <tag 去掉 v>-1``，并在 ``changelog`` 前插一条新记录
+    * ``manifest``   ``version = <tag 去掉 v>-1``，并把 ``changelog`` 换成该版本的
+      新记录（**只留最新一版**，不累加旧记录）
     * ``README.md``  构建命令示例、安装示例、上游锁定版本
 
     每条替换都要求**恰好命中 1 处**，且命中后内容必须真的变化；对不上就报错退出。
     不做全局替换 —— README 里还有描述历史事实的版本号（例如「自 0.6.13-1 起，
     网关会给每个 worker 注入 V8 老生代上限」），它记录的是该能力**引入**的版本，
     不是当前版本，改掉它就变成假话。所以只认「当前版本」语义的那三处。
+
+trim-changelog
+    把 manifest 的 ``changelog`` 收敛成「只留最新一版」。旧行为是累加（最多留
+    10 条），存量仓库里已经攒了历史记录；``bump`` 改成整条替换只对**新**版本
+    生效，收敛旧数据要靠这个子命令。幂等，可以每次运行都跑。
+
+    以 ``<br><br>`` 切分后只保留最前面那条；本来就只有一条时原样返回，不改文件。
 
 用法
 ----
@@ -45,6 +54,9 @@ bump
     python scripts/upstream_sync.py bump --tag v0.6.14
     python scripts/upstream_sync.py bump --tag v0.6.14 --notes-file notes.md
     python scripts/upstream_sync.py bump --tag v0.6.14 --root /tmp/copy --dry-run
+    python scripts/upstream_sync.py check --force --notes-out notes.md
+    python scripts/upstream_sync.py trim-changelog
+    python scripts/upstream_sync.py trim-changelog --dry-run
 
 ``--root`` 写在子命令**前**或**后**都可以，两种写法等价。
 """
@@ -72,11 +84,17 @@ RE_SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 RE_CN_HEADING = re.compile(r"(?im)^#{1,6}[ \t]*中文[ \t]*$")
 RE_BULLET = re.compile(r"^[-*+][ \t]+")
 
-# manifest 的 changelog 是一条 <br> 连接的整行；每条记录之间用 <br><br> 分隔
-CHANGELOG_SEP = "<br><br>"
-# 保留多少条历史记录。manifest 是给应用中心读的展示字段，不是变更日志归档，
-# 无限追加只会让它越来越长；真正的历史在 git 里。
-DEFAULT_MAX_ENTRIES = 10
+# manifest 的 changelog 是**一条** <br> 连接的整行，只写最新一版的更新日志。
+#
+# 不累加历史：manifest 是给应用中心读的展示字段，不是变更日志归档。越攒越长
+# 只会让包详情页难读，还会逼近 fnpack 的取值长度；真正的历史在 git 与各版
+# Release 里。要查「上一版改了什么」就翻上一个 Release 的说明，不靠这个字段。
+# 所以 bump 是**整条替换**，而不是「前插一条、再截掉最旧的几条」。
+#
+# 这个分隔符只在**处理历史遗留**时用到：统计旧记录条数（写进日志），以及
+# trim-changelog 子命令按它切分、只保留最前面那一条。新写入的 changelog 里
+# 不会再出现它。
+LEGACY_CHANGELOG_SEP = "<br><br>"
 
 
 # ---------------------------------------------------------------------------
@@ -439,13 +457,16 @@ def extract_cn_bullets(body):
 
 
 def build_entry(version, upstream_tag, bullets):
-    """组装一条 changelog 记录（不含与下一条之间的 <br><br> 分隔符）。"""
+    """组装 changelog 记录（整条，不含历史）。
+
+    这是 manifest ``changelog`` 的**全部**内容 —— 不拼接旧记录。
+    """
     items = [f"上游 cli2api 同步至 {upstream_tag}（零源码改动）"] + list(bullets)
     body = "<br>".join(f"{i}.{t}" for i, t in enumerate(items, 1))
     return f"v{version}<br>{body}"
 
 
-def bump_manifest(root, version, entry, max_entries):
+def bump_manifest(root, version, entry):
     path = Path(root) / "manifest"
     text = read_text(path)
     notes = []
@@ -460,19 +481,21 @@ def bump_manifest(root, version, entry, max_entries):
 
     text = sub_once(text, RE_MANIFEST_VERSION, set_version, "manifest: version")
 
-    # 2) changelog 前插新记录（幂等：已经以本条开头就不重复插）
+    # 2) changelog **整条替换**成新记录：只保留最新一版，不累加历史。
+    #    幂等：已经是本条就原样返回（release-missing 补发场景会走到这里）。
     def set_changelog(m):
         old = m.group(2)
         cr = "\r" if old.endswith("\r") else ""
         old_val = old.rstrip("\r")
-        if old_val.startswith(f"v{version}<br>"):
-            notes.append("changelog 已有该版本记录，未重复插入")
+        if old_val == entry:
+            notes.append("changelog 已是该版本记录，未改动")
             return m.group(1) + old_val + cr
-        parts = ([entry] + old_val.split(CHANGELOG_SEP)) if old_val else [entry]
-        dropped = max(0, len(parts) - max_entries)
+        dropped = old_val.count(LEGACY_CHANGELOG_SEP) + 1 if old_val else 0
         if dropped:
-            notes.append(f"changelog 超出 {max_entries} 条，丢弃最旧 {dropped} 条")
-        return m.group(1) + CHANGELOG_SEP.join(parts[:max_entries]) + cr
+            notes.append(f"changelog 替换为最新一版（移除 {dropped} 条旧记录）")
+        else:
+            notes.append("changelog 写入最新一版记录")
+        return m.group(1) + entry + cr
 
     text = sub_once(text, RE_MANIFEST_CHANGELOG, set_changelog, "manifest: changelog")
 
@@ -487,7 +510,7 @@ def bump_manifest(root, version, entry, max_entries):
                 f"fnpack 会在此截断，请改写该值")
 
     write_text(path, text)
-    return f"version → {version}，changelog 前插 1 条记录"
+    return f"version → {version}，changelog 更新为最新一版（只保留该条）"
 
 
 def bump_readme(root, old_version, new_version, cur_tag, new_tag):
@@ -512,6 +535,50 @@ def bump_readme(root, old_version, new_version, cur_tag, new_tag):
     )
     write_text(path, text)
     return f"版本引用 {old_version} → {new_version}，锁定 tag {cur_tag} → {new_tag}"
+
+
+def trim_manifest_changelog(root):
+    """把 manifest 的 changelog 收敛成「只留最新一版」，返回一句人类可读的结果描述。
+
+    存量仓库的 changelog 是历史累加出来的（旧行为会一直前插、最多留 10 条）。
+    光把 bump 改成整条替换，只对新版本生效，已写进去的旧记录会永远留在那儿。
+    这个子命令用来做一次性（以及之后每次运行都幂等）的收敛。
+
+    只动「最前面那一条」：以 <br><br> 切分，保留 parts[0]。切分前先确认它真的
+    有 ≥2 条，否则原样返回不动 —— 万一将来改成别的分隔方式，宁可什么都不做
+    也不要乱切。返回的字符串里会写明移除了几条旧记录，方便看日志。
+    """
+    path = Path(root) / "manifest"
+    text = read_text(path)
+
+    state = {"changed": False, "dropped": 0, "noop": ""}
+
+    def fix(m):
+        old = m.group(2)
+        cr = "\r" if old.endswith("\r") else ""
+        old_val = old.rstrip("\r")
+        parts = old_val.split(LEGACY_CHANGELOG_SEP)
+        if len(parts) < 2:
+            state["noop"] = "changelog 已只有一条，无需收敛"
+            return m.group(1) + old_val + cr
+        state["changed"] = True
+        state["dropped"] = len(parts) - 1
+        return m.group(1) + parts[0] + cr
+
+    text = sub_once(text, RE_MANIFEST_CHANGELOG, fix, "manifest: changelog")
+
+    if not state["changed"]:
+        return state["noop"] or "changelog 无需收敛"
+
+    write_text(path, text)
+    return f"changelog 收敛为最新一版（移除 {state['dropped']} 条旧记录）"
+
+
+def cmd_trim_changelog(args):
+    root = Path(args.root).resolve()
+    log(f"收敛 {root / 'manifest'} 的 changelog 为「只留最新一版」")
+    log(f"  → {trim_manifest_changelog(root)}")
+    return 0
 
 
 def read_notes(args, repo, tag):
@@ -560,7 +627,7 @@ def cmd_bump(args):
 
     targets = [
         ("build.py", bump_build_py(root, cur_tag, new_tag, old_version, new_version)),
-        ("manifest", bump_manifest(root, new_version, entry, args.max_entries)),
+        ("manifest", bump_manifest(root, new_version, entry)),
         ("README.md", bump_readme(root, old_version, new_version, cur_tag, new_tag)),
     ]
 
@@ -617,10 +684,14 @@ def main():
     p_bump.add_argument("--tag", required=True, help="新的上游 tag，例如 v0.6.14")
     p_bump.add_argument("--notes-file", default="",
                         help="changelog 素材（上游 Release body 或纯条目）；缺省时自行拉取")
-    p_bump.add_argument("--max-entries", type=int, default=DEFAULT_MAX_ENTRIES,
-                        help=f"changelog 保留的记录条数（默认 {DEFAULT_MAX_ENTRIES}）")
     p_bump.add_argument("--dry-run", action="store_true", help="只打印将要做的改动，不写文件")
     p_bump.set_defaults(func=cmd_bump)
+
+    p_trim = sub.add_parser("trim-changelog",
+                            help="把 manifest 的 changelog 收敛成只留最新一版（幂等）")
+    _add_root_arg(p_trim, suppress_default=True)
+    p_trim.add_argument("--dry-run", action="store_true", help="只打印将要做的改动，不写文件")
+    p_trim.set_defaults(func=cmd_trim_changelog)
 
     args = ap.parse_args()
 

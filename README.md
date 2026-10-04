@@ -119,8 +119,8 @@ fnos-cli2api/
 │   ├── render-icons.py       # 由 SVG 栅格化出 64/256 图标（含尺寸与配色自检）
 │   └── icon-master.png       # 964px 设计源（由 render-icons.py 生成，不进包）
 ├── scripts/
-│   └── upstream_sync.py      # CI 用：查上游新版本 + 锚点式改写版本号（仅标准库）
-├── .github/workflows/        # build-and-release.yml：每周跟随上游并出包
+│   └── upstream_sync.py      # CI 用：查上游新版本 + 锚点式改写版本号 + 收敛 changelog（仅标准库）
+├── .github/workflows/        # check-upstream.yml（定时查上游并派发）+ build-and-release.yml
 ├── .gitattributes            # 固定 eol=lf（cmd/* 变 CRLF 会让安装直接失败）
 ├── .gitignore                # 忽略 .local-build/、__pycache__/、*.fpk
 └── build.py                  # 一键打包（拉上游 → 交叉编译 → 组装 → fnpack）
@@ -203,32 +203,67 @@ python assets/render-icons.py        # 重新生成 ICON.PNG / ICON_256.PNG / ap
 
 ### 3.4 自动跟随上游（GitHub Actions）
 
-`.github/workflows/build-and-release.yml` 每周日跑一次（cron
-`17 4 * * 0`，UTC，即北京时间 12:17；也可在 Actions 页面手动触发）：
+自动化拆成两个 workflow，职责单一：
+
+| workflow | 触发 | 干什么 |
+|---|---|---|
+| `check-upstream.yml` | 每周日 04:17 UTC（cron `17 4 * * 0`，即北京时间 12:17）+ 手动 | 查上游 → 改版本号 → 提交 `main` → 打 tag → **派发**构建 |
+| `build-and-release.yml` | 被上面派发（ref = tag）、`push` tag、手动 | 构建 amd64 + arm64 两个 fpk → 建 Release |
+
+（两个 workflow 都只跑 Python / git 的那几步用 runner 自带的 `python3`，不装
+`setup-python`：`upstream_sync.py` 只依赖标准库。）
+
+`check-upstream.yml` 的一轮：
 
 1. `scripts/upstream_sync.py check` 查上游最新正式 Release，与 `build.py` 的
    `UPSTREAM_TAG` 比较。
-2. **有更新**：把版本落进仓库文件（`build.py` 的 `UPSTREAM_TAG` 与两处说明性注释、
-   `manifest` 的 `version` 与 `changelog`、`README.md` 的三处当前版本引用），
-   构建 amd64 + arm64 两个 fpk，**构建通过后**才提交推回 `main`，并建一个以
-   上游 tag 命名的 Release（`v0.6.14` 这类），附上两个 fpk 与 `SHA256SUMS.txt`。
-3. **无更新**：直接跳过，不构建、不提交、不发布，流程仍是绿的。
+2. **有更新**：`scripts/upstream_sync.py bump` 把版本落进仓库文件（`build.py` 的
+   `UPSTREAM_TAG` 与两处说明性注释、`manifest` 的 `version` 与 `changelog`、
+   `README.md` 的三处当前版本引用），提交推回 `main`，打一个以**上游 tag** 命名的
+   tag（`v0.6.15` 这类），再 `gh workflow run build-and-release.yml --ref <tag>`
+   把构建派发出去。
+3. **无更新**：不构建、不派发。通常到此结束，流程仍是绿的；只有在需要清理历史
+   遗留的 `changelog` 时（见下）才会多一次提交。
 
-顺序上「先构建、后提交」是有意的：`main` 上不会出现"版本号已改但构建不出来"的提交。
+另外每次运行都会跑一遍 `scripts/upstream_sync.py trim-changelog`（幂等），把
+`changelog` 收敛成「只留最新一版」—— 见下一节。
 
-检查步骤排在检出之后、所有 `setup-*` 之前，并用 runner 自带的 `python3`
-（`upstream_sync.py` 只依赖标准库，不需要固定 Python 版本）。所以「无更新」的一次
-运行不会安装 Python / Go / Node，只花检出 + 几次 API 查询的时间。
+#### 为什么要拆开、为什么是「派发」
 
-手动触发时的 `force` 选项会忽略上游比较、按仓库里已锁定的版本重新出包；若上游
-此时正好有更新的版本，会顺带把新版本一起带上，不会反而重发旧版本。
+GitHub 有一条硬规则：**用内置 `GITHUB_TOKEN` 推送 tag 不会触发其它 workflow**
+（防递归）。所以「定时检查 → push tag → 由 tag 触发构建」这条路根本不通 —— tag 会
+乖乖推上去，构建却永远不会开始；而版本号已经提交进 `main`，下次检查判定「无更新」，
+这个版本就永远没有 Release。例外只有 `workflow_dispatch` / `repository_dispatch`
+两个事件，因此必须显式**派发**（`actions: write` 权限就是给它用的）。
 
-`scripts/upstream_sync.py` 的替换全部基于**锚点**并要求恰好命中 1 处，命中后内容
-还必须真的变化，否则报错退出。所以 README 里描述历史事实的版本号（如「自 0.6.13-1
-起，网关会给每个 worker 注入 V8 老生代上限」）不会被误改 —— 它记录的是该能力
-**引入**的版本，不是当前版本。要新增版本引用，请按同样方式给锚点，不要改成全局替换。
+#### 更新日志只保留最新一版
 
-> 说明：Actions 的 `schedule` 在仓库连续 60 天无提交后会暂停，届时手动跑一次即可恢复。
+`manifest` 的 `changelog` 是给应用中心展示的字段，**只写最新一版**的更新日志，不做
+历史累加 —— `bump` 是整条替换。要查旧版本改了什么，翻对应的 Release 说明或 git 历史。
+
+旧行为是累加（最多留 10 条），存量 `changelog` 里已经攒了几条历史。所以
+`scripts/upstream_sync.py` 另外提供 `trim-changelog` 子命令，把已有记录收敛成
+「只留最新一版」，每次运行都跑（幂等）。历史不会丢：那些内容本来就在各版 Release
+说明和 git 里。这一步是清理性的、标了 `continue-on-error`，失败最多是这一轮没收敛
+（下轮再试），不会拖住版本号同步与派发构建。
+
+#### 其它
+
+- 「无更新」的一次运行只花检出 + 几次 API 查询的时间，不装 Python / Go / Node。
+- 手动跑 `check-upstream.yml` 时勾 `force`，会忽略上游比较、按仓库里已锁定的版本
+  重新出包；若上游此时正好有更新的版本，会顺带把新版本一起带上，不会反而重发旧版本。
+- 重发某个版本：手动跑 `build-and-release.yml`，ref 填对应 tag。
+- **自愈**：万一提交/打 tag 成功而构建或发布失败，下次定时运行会发现「tag 在、
+  Release 不在」，自动补一次派发；判据始终是「远端实际有什么」，不是「本地以为做过什么」。
+- `scripts/upstream_sync.py` 的替换全部基于**锚点**并要求恰好命中 1 处，命中后内容
+  还必须真的变化，否则报错退出。所以 README 里描述历史事实的版本号（如「自 0.6.13-1
+  起，网关会给每个 worker 注入 V8 老生代上限」）不会被误改 —— 它记录的是该能力
+  **引入**的版本，不是当前版本。要新增版本引用，请按同样方式给锚点，不要改成全局替换。
+
+> 说明：Actions 的 `schedule` 是「尽力而为」，实测本仓库常在计划时间后 6 小时左右才
+> 真正开跑（2026-10-04 那次 04:17 UTC 的计划，实际 10:35 UTC 才启动），所以「周日的
+> 包」不保证在北京时间中午准时出现。另外 `schedule` 在仓库连续 60 天无提交后会暂停，
+> 届时手动跑一次即可恢复。
 
 ### 3.5 本地调试（无需飞牛设备）
 
