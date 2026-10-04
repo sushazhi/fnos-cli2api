@@ -56,9 +56,9 @@ CACHE_FILE = os.path.join(BUILD_DIR, "versions.json")
 
 APP_NAME = "cli2api"
 
-# --- 上游（版本与 manifest 的 0.6.13-N 对应，只用 tag，不用 master）---
+# --- 上游（版本与 manifest 的 0.6.15-N 对应，只用 tag，不用 master）---
 UPSTREAM_REPO = "caigee-cmd/cli2api"
-UPSTREAM_TAG = "v0.6.13"
+UPSTREAM_TAG = "v0.6.15"
 
 # --- 与飞牛侧的契约（build.py 里集中一份，用 check_consistency() 与各文件比对）---
 GATEWAY_PREFIX = "/app/cli2api"
@@ -537,7 +537,7 @@ def build_binaries(arch):
 
     log(f"  编译上游 cli2api ({arch}) ...")
     out = os.path.join(BIN_CACHE, f"cli2api-linux-{arch}")
-    # 版本号用上游 tag（0.6.13）而不是 fnOS 包版本（0.6.13-1）: 上游控制台的
+    # 版本号用上游 tag（0.6.15）而不是 fnOS 包版本（0.6.15-1）: 上游控制台的
     # 更新检查会拿它跟 GitHub release 比，带 -1 后缀可能被判成「更新」而误报。
     run(["go", "build", "-trimpath",
          "-ldflags",
