@@ -32,4 +32,4 @@ desktop_uidir         = ui
 desktop_applaunchname = cli2api.Application
 
 # 更新日志
-changelog             = v0.6.15-1<br>1.上游 cli2api 同步至 v0.6.15（零源码改动）<br>2.账号运行目录不能执行程序时，Qoder 国内版签到会改到可执行目录读取机器指纹。<br><br>v0.6.13-1<br>1.上游 cli2api 同步至 v0.6.13（零源码改动）：账号类型卡片、Codex 用量窗口、流式响应结束写日志<br>2.修复 Qoder 国内版每日签到（补齐活动服务要求的机器身份请求头）<br>3.路由区域锁定不再跨越大规模账号池变化，新增或迁移大量其他区域账号后会重新落到账号最多的区域<br>4.新增系统设置：已停用账号可继续执行已开启的自动签到，且不会重新参与聊天调度<br>5.网关给每个 Qoder worker 注入 V8 老生代上限 NODE_OPTIONS=--max-old-space-size=384（每个启用账号一份，可用 QODER_WORKER_MAX_OLD_SPACE_MB 覆盖，设为 0 关闭）<br><br>v0.6.11-3<br>1.修正控制台「API 接入」页显示/复制的地址：改为下游端口的绝对地址（原先按面板所在域补全，显示成飞牛桌面端口 8666，抄到客户端连不通）<br><br>v0.6.11-2<br>1.应用图标更换为上游官方图标（frontend/public/apple-touch-icon.svg）<br>2.下游端口改用上游默认端口 3010（与上游 docker-compose 一致）<br>3.worker 内部端口段对齐上游默认值 32100<br><br>v0.6.11-1<br>1.上游 cli2api v0.6.11 原样集成（零源码改动），外套飞牛网关适配层<br>2.统一网关接入：面板走 /app/cli2api，仅管理员可访问，免密登录（自动注入控制台密钥）<br>3.下游独立端口：标准 OpenAI 兼容接口 + Qoder 原生 /v1/messages、/v1/responses<br>4.Qoder CLI 国内区/全球区组件与 nodejs_v24 运行时依赖随包声明<br>5.控制台自带更新入口在飞牛上不可用（无宿主机 updater），属预期降级
+changelog             = v0.6.15-1<br>1.上游 cli2api 同步至 v0.6.15（零源码改动）<br>2.账号运行目录不能执行程序时，Qoder 国内版签到会改到可执行目录读取机器指纹。
