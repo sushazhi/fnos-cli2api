@@ -170,7 +170,7 @@ python build.py --skip-upstream      # 复用已下载的上游源码
 python build.py --package-only       # 跳过编译，只重新打包
 python build.py --no-sharp           # 不打包 sharp/libvips（省约 17MB 解包体积）
 python build.py --force              # 强制重新下载上游与 npm 包
-python build.py --version 0.6.15-1   # 覆盖版本号
+python build.py --version 0.6.17-1   # 覆盖版本号
 ```
 
 首次构建约需数分钟（主要是下载两个 Qoder CLI 组件包，合计约 57MB）。npm 包会缓存在 `.local-build/`，重复构建不重复下载。
@@ -300,7 +300,7 @@ gofmt -l . && go vet ./... && go test ./...
 
 ```bash
 # 安装
-appcenter-cli install-fpk cli2api-0.6.15-1-amd64.fpk
+appcenter-cli install-fpk cli2api-0.6.17-1-amd64.fpk
 
 # 查看状态 / 启停
 appcenter-cli list
@@ -408,7 +408,7 @@ QODER_WORKER_MAX_OLD_SPACE_MB=0        # 关闭注入
 
 ## 7. 上游与许可
 
-上游仓库：[`caigee-cmd/cli2api`](https://github.com/caigee-cmd/cli2api)，当前锁定 **v0.6.15**。
+上游仓库：[`caigee-cmd/cli2api`](https://github.com/caigee-cmd/cli2api)，当前锁定 **v0.6.17**。
 版本升级时需同步修改 `build.py` 的 `UPSTREAM_TAG`，并复核 worker 的 CLI 兼容探针。
 （`scripts/upstream_sync.py` 会按锚点自动改这一处；手动改时注意别动 §5.3 里描述
 能力**引入**版本的「自 0.6.13-1 起」。）

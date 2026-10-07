@@ -1,5 +1,5 @@
 appname               = cli2api
-version               = 0.6.15-1
+version               = 0.6.17-1
 display_name          = CLI2API
 desc                  = <b>多提供商账号池 → OpenAI 兼容 API 网关</b>（基于上游 cli2api），内置官方 Web 控制台，安装即用。<br><br><b>支持渠道：</b>以 <b>WorkBuddy</b> 为主力（国内版 / 国际版），并支持 <b>Qoder 国际版 / 国内版</b>、<b>Trae 国内版 Work</b>，以及实验性的 <b>Devin</b> 与 <b>Command Code</b>。<br><br><b>标准接口：</b>/v1/chat/completions、/v1/models、/v1/messages、/v1/responses<br><br><b>账号池调度：</b>多账号加权轮转、会话粘性、失败重试与熔断冷却；跨渠道同名模型可调度，并可按账号启用每日签到。<br><br><b>控制台：</b>经飞牛统一网关接入，复用飞牛登录态、免密登录，仅管理员可访问。<br><br><b>下游接入：</b>独立端口 http://＜飞牛IP＞:3010/v1，任意 OpenAI SDK 直连。<br><br><b>运行时：</b>Qoder 渠道由内置 Node worker 驱动，依赖应用中心 Node.js 运行时（nodejs_v24，安装时自动带上）；其余渠道在 Go 进程内直连上游。
 
@@ -32,4 +32,4 @@ desktop_uidir         = ui
 desktop_applaunchname = cli2api.Application
 
 # 更新日志
-changelog             = v0.6.15-1<br>1.上游 cli2api 同步至 v0.6.15（零源码改动）<br>2.账号运行目录不能执行程序时，Qoder 国内版签到会改到可执行目录读取机器指纹。
+changelog             = v0.6.17-1<br>1.上游 cli2api 同步至 v0.6.17（零源码改动）<br>2.概览页的资源占用卡片提前到账号池旁边，排在流量排行之前。
