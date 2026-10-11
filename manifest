@@ -32,4 +32,4 @@ desktop_uidir         = ui
 desktop_applaunchname = cli2api.Application
 
 # 更新日志
-changelog             = v0.6.20-1<br>1.上游 cli2api 同步至 v0.6.20（零源码改动）<br>2.修复 Qoder 上游网关偶发 200 + 仅心跳帧时，网关静默返回"空且不合规"的补全。进程内直连客户端现在会在转发前拒绝空流（执行层可冷却该账号并切换到其他账号重试）；对已输出内容但在终态 `finish_reason` 前被切断的流，合成 `stop` / `tool_calls` 终态帧进行挽救；非流式空响应不再凭空合成 `stop` 而是报错。严格的 OpenAI 兼容客户端（如 pi coding agent）不再出现 `Stream ended without finish_reason`。<br>3.让 Qoder 额度刷新失败在账号刷新接口中可见，同时保持账号就绪状态不受影响，并让额度与模型目录刷新相互独立执行。
+changelog             = v0.6.20-1<br>1.上游 cli2api 同步至 v0.6.20（零源码改动）<br>2.修复 Qoder 上游网关偶发 200 + 仅心跳帧时，网关静默返回"空且不合规"的补全。进程内直连客户端现在会在转发前拒绝空流（执行层可冷却该账号并切换到其他账号重试）；对已输出内容但在终态 finish_reason 前被切断的流，合成 stop / tool_calls 终态帧进行挽救；非流式空响应不再凭空合成 stop 而是报错。严格的 OpenAI 兼容客户端（如 pi coding agent）不再出现 Stream ended without finish_reason。<br>3.让 Qoder 额度刷新失败在账号刷新接口中可见，同时保持账号就绪状态不受影响，并让额度与模型目录刷新相互独立执行。

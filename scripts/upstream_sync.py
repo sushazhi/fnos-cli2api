@@ -425,15 +425,81 @@ def bump_build_py(root, cur_tag, new_tag, old_version, new_version):
     return f"UPSTREAM_TAG {cur_tag} → {new_tag}"
 
 
+# fnpack（实测 1.2.3）写回包内 manifest 时会**改写**含这些 ASCII 字符的取值。
+# 这不是我们的解析器在挑剔，是打包器本身的行为，所以只能在素材阶段净化。
+#
+# 两类改写方式，都会让「stage 里的 manifest」和「包内 manifest」逐值不一致，
+# build.py 的 verify_fpk 自检随即阻断构建（run 38133463550 / tag v0.6.20）：
+#
+#   1) 反引号 '`'（按位置分两种，实测都有）：
+#      · 出现在取值中间/结尾 -> fnpack 用三个双引号把**整个取值**包起来
+#        （前后各多 3 字符）。实战：369 字符 → 375 字符，正是 v0.6.20 那次
+#        失败的报错。上游 Release 正文里 `` `finish_reason` `` 这类行内代码
+#        写法很常见，所以这条几乎必然会踩到。
+#      · 出现在取值**开头** -> 被当成 TOML 字符串起始符且永不闭合，fnpack 直接
+#        报 `missing closing key quote`，**打包中断、不产出 fpk**（且 exit code
+#        仍是 0，不能靠退出码判断）。净化后这一种同样不会发生。
+#   2) 终止符 ';' 与 '#'：解析器在该字符处把整行**拆成两行** —— 前半截断成取值，
+#      后半从第 0 列重开（即注入一行伪造行）；位置 0 时该字段本身还会被清空。
+#      详见 build.py 的 check_manifest_values 与 MANIFEST_VALUE_TERMINATORS。
+#
+# 净化策略：能保留语义的就换成全角等价字符（'；' '＃'，人读起来一样），
+# 反引号只是 Markdown 的行内代码包裹符，直接去掉、把里面的文字留下 —— 例如
+# `` `stop` `` → `` stop ``，信息不丢。
+#
+# 注意 '&' **不在**此列：对 ASCII 0x20–0x7E 逐个做真实 fnpack 打包实测
+# （共 95 次），'&' 单独出现在取值里原样保留、不截断也不包裹。早先把「&lt;
+# 被截断」归咎于 '&' 是误判 —— 真凶是实体结尾的 ';'，已被分号规则覆盖。
+# 把 '&' 也换掉纯属语义污染：'R&D' 会变成 'R＆D'，'&amp;' 会变成 '＆amp;'
+# 从而破坏 HTML 实体。所以这里只净化真正会被 fnpack 改写的那三个字符。
+SANITIZE_MAP = (
+    ("`", ""),      # 反引号：去掉包裹符，保留内文（本事故的直接修复点）
+    ("#", "＃"),     # 截断符 → 全角
+    (";", "；"),     # 截断符 → 全角
+)
+SANITIZE_CHARS = "".join(ch for ch, _ in SANITIZE_MAP)
+
+
 def sanitize_fragment(s):
     """把上游 release 里的一段文字收拾成能放进 manifest 取值的样子。
 
-    manifest 的取值由 fnpack 解析，ASCII ';' 会被当成终止符截断（build.py 的
-    check_manifest_values 会硬失败），所以这里先把 ';' 换成全角；'<br>' 是
-    changelog 的结构分隔符，出现在条目里会打乱层级，也一并换掉。
+    manifest 的取值最终由 fnpack 解析/写回，有三个 ASCII 字符会被它改写，
+    必须在这里提前净化（实测 fnpack 1.2.3；对 ASCII 0x20–0x7E 逐个真实打包
+    验证过，只有这三个会出问题）：
+
+    * '`' —— 出现在取值**中间或结尾**时，fnpack 用 ``\"\"\"`` 把整个取值包起来
+      （前后各 +3 字符），stage 与包内 manifest 于是不一致，verify_fpk 自检
+      报「changelog 与 stage 不一致（369 字符 → 375 字符）」并阻断构建
+      （GitHub Actions run 38133463550，tag v0.6.20）；出现在取值**开头**时更
+      严重 —— 被当成 TOML 字符串起始符且永不闭合，直接
+      `missing closing key quote` **打包中断**。去掉反引号即可，
+      内文照常保留：`` `stop` `` → `` stop ``。
+    * '#' / ';' —— 被当成取值终止符：解析器在此拆行，后面内容从第 0 列重开成
+      一行伪造行；位置 0 时该字段本身被清空。换成全角 '＃' / '；'，语义不变。
+
+    '&' 是安全的，**不净化**：实测单独出现原样保留；且 'R&D' 这类正常写法
+    换成全角 '＆' 属于语义污染。早先把「&lt; 被截断」归咎于 '&' 是误判 ——
+    真凶是实体结尾的 ';'，已被上面的分号规则覆盖。
+
+    ……因此有一个**已知副作用（有意为之，不是 bug）**：HTML 实体的结尾分号
+    也会被换成全角，例如 ``&amp;`` → ``&amp；``、``&lt;`` → ``&lt；``。
+    换掉后实体不再被解析，会按字面显示，实体语义丢失。之所以接受：
+
+    * 不换的后果是**截断** —— fnpack 会从那个 ';' 处丢掉后面全部内容，属于
+      静默数据丢失，还可能触发 verify_fpk 自检阻断构建；实体失效只是显示层
+      问题。宁可显示差一点，不能丢内容。
+    * 本仓库 manifest 从未用过 HTML 实体（核查过历史版本 43fa9723 / 56ee60b /
+      d8b8ebf / de2100d，取值里 ``&amp;`` ``&lt;`` ``&gt;`` ``&quot;``
+      ``&nbsp;`` 一个都没有），所以该副作用目前是纯理论的，无实际回归。
+    * 反过来给实体开特例（「分号前是 &xxx 就豁免」）需要维护一条易错的正则，
+      却换不来任何实际用例 —— 规则简单、单一、可预测更值钱。
+
+    另外 '<br>' 是 changelog 的结构分隔符，出现在条目里会打乱层级，换成 '、'。
+    最后做空白折叠并去掉行首的项目符号（RE_BULLET）。
     """
     s = s.replace("<br>", "、").replace("<BR>", "、")
-    s = s.replace(";", "；")
+    for ch, repl in SANITIZE_MAP:
+        s = s.replace(ch, repl)
     s = re.sub(r"\s+", " ", s).strip()
     s = RE_BULLET.sub("", s)
     return s.strip()
@@ -499,15 +565,25 @@ def bump_manifest(root, version, entry):
 
     text = sub_once(text, RE_MANIFEST_CHANGELOG, set_changelog, "manifest: changelog")
 
-    # 3) fnpack 会在 ASCII ';' 处截断取值，落地前先自查一遍
+    # 3) 落地前自查：fnpack 会改写含这些 ASCII 字符的取值，写完就晚了，先拦一道。
+    #    正常路径上 sanitize_fragment 已经净化过 changelog；这里查的是**整份
+    #    manifest 的每一行取值**，任何来源（后续手改、别的字段）漏网都能兜住。
+    #    只查真正会被改写的 ';' / '#' / '`'，不查 '&'（fnpack 1.2.3 实测安全，
+    #    且 '&amp;' 这类实体的截断真凶是结尾的 ';'）。
     for line in text.split("\n"):
         if "=" not in line or line.lstrip().startswith("#"):
             continue
         key, val = line.split("=", 1)
-        i = val.find(";")
-        if i >= 0:
-            die(f"manifest: {key.strip()} 的取值里有 ASCII ';'（第 {i} 个字符），"
-                f"fnpack 会在此截断，请改写该值")
+        for ch in SANITIZE_CHARS:
+            i = val.find(ch)
+            if i < 0:
+                continue
+            if ch == "`":
+                die(f"manifest: {key.strip()} 的取值里有 ASCII 反引号 '`'"
+                    f"（第 {i} 个字符），fnpack 会用 \"\"\" 包裹整个取值，"
+                    f"导致包内 manifest 与 stage 不一致，请去掉该字符")
+            die(f"manifest: {key.strip()} 的取值里有 ASCII {ch!r}"
+                f"（第 {i} 个字符），fnpack 会在此处截断，请改写该值")
 
     write_text(path, text)
     return f"version → {version}，changelog 更新为最新一版（只保留该条）"

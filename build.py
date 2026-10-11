@@ -175,11 +175,36 @@ def read_manifest_version():
     return ""
 
 
-# fnpack 的 manifest 解析器把 ASCII 分号 `;` 当成取值终止符：值里第一个 `;`
-# 之后的内容被静默丢弃（实测 fnpack 1.2.3，见 D:\\fnos 下项目的真实事故：
-# changelog 里写了 `&lt;标识&gt;`，2672 字符只剩 1092 字符进包）。
-# 危害是完全静默，因此这里做成构建期硬失败。
-MANIFEST_VALUE_TERMINATORS = (";",)
+# fnpack 写回包内 manifest 时会改写某些取值，而 verify_fpk 逐值比对 stage 与包内
+# manifest，因此任何一处改写都会让构建中断。实测 fnpack 1.2.3：
+#
+# 1) 终止符 `;` / `#`（穷举 ASCII 0x20-0x7E，95 次真实打包，只有这两个是终止符）
+#    解析器在该字符处把整行**拆成两行**：前半截断成取值，后半从**第 0 列**重开一行。
+#      `a;b`   -> 多出一行 `; b`，changelog 变成 `a`
+#      `;abc`  -> 多出一行 `; abc`（第 0 列是 `;`），changelog 变成**空**
+#      `abc;`  -> 多出一行 `; `，changelog 变成 `abc`
+#    即：**任何位置都会注入一行伪造行**；位置 0 时该字段本身还会被清空。
+#    （无参数 `main()` 已检查产物是否存在，能兜住注入导致的解析失败，但注入本身
+#     是静默的，所以这里做构建期硬失败。）
+#
+# 2) 反引号 `` ` ``（另一类，见下）
+#      位置 0：fnpack 把它当成 TOML 字符串起始符且永不闭合 ->
+#              `Packing failed. Parse manifest file ... failed: missing closing
+#              key quote`，**打包中断且不产出 fpk**。注意 fnpack 此时 exit code
+#              仍是 0，只能靠 os.path.exists(产物) 判断。
+#      非 0 位置：整值被 `"""` 包裹（前后各 +3 字符，共 +6），如 `a`b` -> `"""a`b"""`。
+#
+# 其余 92 个可打印 ASCII（含 `&`）原样保留，单独出现完全安全。
+# 注意 `&` **不是**终止符：历史上「`&lt;` 被截断」的真正原因是实体结尾那个 `;`，
+# 属于分号规则。把 `&` 列进来会误伤 desc / changelog 里合法出现的 `&amp;`。
+MANIFEST_VALUE_TERMINATORS = (";", "#")
+
+# 反引号是另一类问题：位置 0 会直接打包失败，其他位置会让整值被 `"""` 包裹。
+# 已按 `"""..."""` 且内文含反引号书写的取值，fnpack 会原样保留（实测 9 -> 9），故不报错；
+# 但包裹而内文无反引号时 fnpack 会把三引号剥掉（实测 `"""AB"""` -> `AB`），仍需报错。
+MANIFEST_VALUE_WRAPPER = '"' * 3
+MANIFEST_VALUE_WRAP_CHAR = '`'
+MANIFEST_VALUE_WRAP_DELTA = 2 * len(MANIFEST_VALUE_WRAPPER)
 
 
 def manifest_values(text):
@@ -195,14 +220,68 @@ def manifest_values(text):
 def check_manifest_values(text):
     problems = []
     for key, val in manifest_values(text).items():
+        # 截断类只报第一个终止符：fnpack 在第一个终止符就拆行，后面即使还有 `#`
+        # 也不会再触发，列出来只会是噪音。
         for term in MANIFEST_VALUE_TERMINATORS:
             i = val.find(term)
-            if i >= 0:
+            if i < 0:
+                continue
+            if i == 0:
+                # 位置 0：该行以终止符开头，fnpack 会把整行拆成「裸终止符行 + 空取值」
                 problems.append(
-                    f"{key}: 取值里第 {i} 个字符是 {term!r}，fnpack 会在此处截断 —— "
-                    f"包内只会保留前 {i} 个字符（当前共 {len(val)} 个）。"
+                    f"{key}: 取值以终止符 {term!r} 开头（第 0 个字符），fnpack 会把"
+                    f"该行拆成两行 —— 一行裸 {term!r}（第 0 列，会被当成注释或非法行）"
+                    f"＋一行空的 {key}，即该字段被清空、并注入一行伪造行。"
+                    f"请去掉取值开头的 {term!r}（当前共 {len(val)} 个字符）。"
+                )
+            else:
+                problems.append(
+                    f"{key}: 取值里第 {i} 个字符是 {term!r}，fnpack 会在此处拆行 —— "
+                    f"包内取值只剩前 {i} 个字符，且第 {i} 个字符之后的内容会从第 0 列"
+                    f"重开一行，注入一行伪造行（当前共 {len(val)} 个）。"
                     f"请改写该值（例如去掉 HTML 实体 &lt; &gt; &amp;）"
                 )
+            break
+        # 已用 `"""..."""` 包裹的取值：只有当内文含反引号时 fnpack 才原样保留
+        # （实测 `"""A`B"""` 9 -> 9）。不含反引号时 fnpack 反而会把三引号**剥掉**
+        # （实测 `"""AB"""` -> `AB`），那同样是改写，必须报错而不是放行。
+        if (len(val) >= 2 * len(MANIFEST_VALUE_WRAPPER)
+                and val.startswith(MANIFEST_VALUE_WRAPPER)
+                and val.endswith(MANIFEST_VALUE_WRAPPER)
+                and MANIFEST_VALUE_WRAP_CHAR in val):
+            continue
+        i = val.find(MANIFEST_VALUE_WRAP_CHAR)
+        if i == 0:
+            # 位置 0：fnpack 当成 TOML 字符串起始符且永不闭合 -> 直接打包失败
+            problems.append(
+                f"{key}: 取值以反引号 {MANIFEST_VALUE_WRAP_CHAR!r} 开头（第 0 个字符），"
+                f"fnpack 会把它当成 TOML 字符串起始符且找不到闭合，"
+                f"直接 **打包中断且不产出 fpk** —— 报错为 "
+                f"'failed: missing closing key quote'。"
+                f"注意 fnpack 此时 exit code 仍是 0，不能靠退出码判断。"
+                f"请去掉取值开头的反引号（如改用单引号）。"
+            )
+        elif i > 0:
+            problems.append(
+                f"{key}: 取值里第 {i} 个字符是反引号 {MANIFEST_VALUE_WRAP_CHAR!r}，"
+                f"fnpack 会用 {MANIFEST_VALUE_WRAPPER} 把整个取值包裹起来"
+                f"（前后各 +3 字符，共 +{MANIFEST_VALUE_WRAP_DELTA}），"
+                f"包内长度会从 {len(val)} 变成 {len(val) + MANIFEST_VALUE_WRAP_DELTA}，"
+                f"与 stage 不一致导致校验阻断。"
+                f"请改写该值（如改用单引号或去掉反引号），"
+                f"或按 fnpack 约定写成 {MANIFEST_VALUE_WRAPPER}取值{MANIFEST_VALUE_WRAPPER}。"
+            )
+        elif (len(val) >= 2 * len(MANIFEST_VALUE_WRAPPER)
+                and val.startswith(MANIFEST_VALUE_WRAPPER)
+                and val.endswith(MANIFEST_VALUE_WRAPPER)):
+            # `"""..."""` 包裹但不含反引号：fnpack 会剥掉三引号（实测 `"""AB"""` -> `AB`）
+            problems.append(
+                f"{key}: 取值被 {MANIFEST_VALUE_WRAPPER} 包裹但内文没有反引号，"
+                f"fnpack 会剥掉这三引号（包内变成 {val[len(MANIFEST_VALUE_WRAPPER):-len(MANIFEST_VALUE_WRAPPER)]!r}，"
+                f"{len(val)} -> {len(val) - MANIFEST_VALUE_WRAP_DELTA} 字符），"
+                f"与 stage 不一致导致校验阻断。请去掉多余的三引号，"
+                f"只在取值确实含反引号时才使用该写法。"
+            )
     return problems
 
 
@@ -820,7 +899,7 @@ def assemble(arch, version, with_sharp):
 
     problems = check_manifest_values(mf)
     if problems:
-        log("  ERROR: manifest 取值会被 fnpack 截断，已中止：")
+        log("  ERROR: manifest 取值会被 fnpack 改写（截断 / 注入伪造行 / 三引号包裹），已中止：")
         for p in problems:
             log(f"    - {p}")
         sys.exit(1)
